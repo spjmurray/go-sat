@@ -24,6 +24,49 @@ import (
 	"strings"
 )
 
+// Set allows O(log N) insertion and deletion.
+type Set[T comparable] map[T]any
+
+// Add adds a new member.
+func (s Set[T]) Add(t T) {
+	s[t] = nil
+}
+
+// Delete removes and existing member.
+func (s Set[T]) Delete(t T) {
+	delete(s, t)
+}
+
+// Has checks whether a value is in the set.
+func (s Set[T]) Has(t T) bool {
+	_, ok := s[t]
+
+	return ok
+}
+
+// All provides non-deterministic iteration.
+func (s Set[T]) All() iter.Seq[T] {
+	return func(yield func(t T) bool) {
+		for k := range s {
+			if !yield(k) {
+				return
+			}
+		}
+	}
+}
+
+// AllSortedFunc provides deterministic iteration.  This is a lot slower
+// than non-deterministic, but useful for debugging.
+func (s Set[T]) AllSortedFunc(cmp func(T, T) int) iter.Seq[T] {
+	return func(yield func(t T) bool) {
+		for _, k := range slices.SortedFunc(maps.Keys(s), cmp) {
+			if !yield(k) {
+				return
+			}
+		}
+	}
+}
+
 // PartialClause is used during conflic resolution to resolve a new clause.
 // It maps the variable to whether or not it's negated.
 type PartialClause map[*Variable]bool
@@ -150,10 +193,6 @@ func NewVariable(name, extName string) *Variable {
 		name:    name,
 		extName: extName,
 	}
-}
-
-func compareVariable(a, b *Variable) int {
-	return strings.Compare(a.name, b.name)
 }
 
 func (v *Variable) String() string {
@@ -302,19 +341,27 @@ func (l *Literal) String() string {
 type Clause struct {
 	// BooleanStatePublisher allows the variable to notify subscribers of updates.
 	BooleanStatePublisher
+	// name is the name of the clause.
+	name string
 	// literals is an ordered list of all iterals that make up the clause.
 	literals []*Literal
 	// defined is a count of the number of defined literals.
 	defined int
 	// bitfield records the boolean states of all the literals (upto 64 for now...)
-	bitfield int
+	bitfield []int64
 	// initialized is used for consistency of the defined count.
 	initialized bool
 }
 
 func NewClause(literals ...*Literal) *Clause {
+	// The maths for the bitfield is quite simple.
+	// ((1 + 63) >> 6) = (64 >> 6) = 1
+	// ((64 + 63) >> 6) = (127 >> 6) = 1
+	words := (len(literals) + 63) >> 6
+
 	c := &Clause{
 		literals: literals,
+		bitfield: make([]int64, words),
 	}
 
 	for i := range literals {
@@ -345,20 +392,29 @@ func (c *Clause) Complete() bool {
 	return c.defined == len(c.literals)
 }
 
-// Unit tells us if one literal is unset.
+// Unit tells us if one literal is unset and it has to be true.
 func (c *Clause) Unit() bool {
-	return c.defined == len(c.literals)-1
+	return !c.state.value && c.defined == len(c.literals)-1
 }
 
 // Value tells us whether there is a conflict (false), or not.
 func (c *Clause) Value() bool {
-	return c.bitfield != 0
+	for _, i := range c.bitfield {
+		if i != 0 {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (c *Clause) update(i int, s *BooleanState) {
+	word := i >> 6
+	bit := i & 0x3f
+
 	// Zero out the bit unconditionally, this handles when the value
 	// is undefined and when defined but false.
-	c.bitfield &= ^(1 << i)
+	c.bitfield[word] &= ^(1 << bit)
 
 	// If something is defined either during initialization or as pert
 	// of normal operation, update the counts and values.
@@ -366,7 +422,7 @@ func (c *Clause) update(i int, s *BooleanState) {
 		c.defined++
 
 		if s.value {
-			c.bitfield |= 1 << i
+			c.bitfield[word] |= 1 << bit
 		}
 	}
 
@@ -375,6 +431,12 @@ func (c *Clause) update(i int, s *BooleanState) {
 	if !s.defined && c.initialized {
 		c.defined--
 	}
+
+	// Propagate the new state up to any subscribers.
+	c.state.defined = c.Complete()
+	c.state.value = c.Value()
+
+	c.notify()
 }
 
 // Partial returns a partial clause for conflict resolution.
@@ -390,16 +452,54 @@ func (c *Clause) Partial() PartialClause {
 
 // ClauseList wraps up handling of clauses.
 type ClauseList struct {
+	// counter is used to name clauses for determinism.
+	counter int
+	// items are all the clauses in list.
 	items []*Clause
+	// unit are clauses that have one missing literal and have a value
+	// of false, meaning the remaining one needs to be true.
+	unit Set[*Clause]
+	// conflicts are updated by subscriptions on the clause.
+	conflicts Set[*Clause]
 }
 
 func NewClauseList() *ClauseList {
-	return &ClauseList{}
+	return &ClauseList{
+		unit:      Set[*Clause]{},
+		conflicts: Set[*Clause]{},
+	}
 }
 
 // Add appends a new clause to the list.
 func (l *ClauseList) Add(c *Clause) {
+	name := fmt.Sprint("c", l.counter)
+	l.counter++
+
+	c.name = name
+
 	l.items = append(l.items, c)
+
+	update := func(s *BooleanState) {
+		l.update(c, s)
+	}
+
+	c.Subscribe(update)
+}
+
+func (l *ClauseList) update(c *Clause, s *BooleanState) {
+	// Do conflict detection.
+	if s.defined && !s.value {
+		l.conflicts.Add(c)
+	} else {
+		l.conflicts.Delete(c)
+	}
+
+	// Do unit detection.
+	if c.Unit() {
+		l.unit.Add(c)
+	} else {
+		l.unit.Delete(c)
+	}
 }
 
 func (l *ClauseList) Dump() {
@@ -513,10 +613,9 @@ func (s *CDCLSolver) Dump() {
 // conflict returns true if a conflict has been detected and the clause
 // that caused it.
 func (s *CDCLSolver) conflict() (*Clause, bool) {
-	for _, clause := range s.clauses.items {
-		if clause.Complete() && !clause.Value() {
-			return clause, true
-		}
+	// TODO: deterministic option?
+	for clause := range s.clauses.conflicts.All() {
+		return clause, true
 	}
 
 	return nil, false
@@ -524,13 +623,8 @@ func (s *CDCLSolver) conflict() (*Clause, bool) {
 
 // bcpSingle runs a single BCP pass, returning true if we did something.
 func (s *CDCLSolver) bcpSingle() bool {
-	for _, clause := range s.clauses.items {
-		// We only care if one is unset and it's false already, so we can infer
-		// the child must be true.
-		if !clause.Unit() || clause.Value() {
-			continue
-		}
-
+	// TODO: deterministic option?
+	for clause := range s.clauses.unit.All() {
 		// Find the unset literal and make it true...
 		for _, literal := range clause.literals {
 			if !literal.state.defined {
@@ -614,8 +708,8 @@ func (s *CDCLSolver) handleConflict(clause *Clause) {
 	// Finally add our new clause.
 	l := make([]*Literal, 0, len(partial))
 
-	// You'll thank me for this determinism when debugging...
-	for _, variable := range slices.SortedFunc(maps.Keys(partial), compareVariable) {
+	// TODO: deterministic option?
+	for variable := range partial {
 		l = append(l, NewLiteral(variable, partial[variable]))
 	}
 
