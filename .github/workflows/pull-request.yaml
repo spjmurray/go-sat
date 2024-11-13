@@ -1,0 +1,25 @@
+name: Pull Request
+on:
+  pull_request:
+    paths-ignore:
+    - "*.md"
+    types:
+    - opened
+    - synchronize
+    - reopened
+    - ready_for_review
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    - name: Setup Go
+      uses: actions/setup-go@v3
+      with:
+        go-version-file: go.mod
+        cache: true
+    - name: Golang CI
+      run: make lint
+    - name: Unit Test
+      run: make test
