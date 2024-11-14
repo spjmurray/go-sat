@@ -18,7 +18,6 @@ package sat_test
 
 import (
 	"fmt"
-	"iter"
 	"testing"
 
 	sat "github.com/spjmurray/go-sat"
@@ -43,73 +42,45 @@ func varName(i, j, n int) string {
 	return fmt.Sprintf("%d:%d:%d", i, j, n)
 }
 
-func permute[T any](t []T) iter.Seq2[T, T] {
-	return func(yield func(T, T) bool) {
-		for i := range t {
-			for j := i + 1; j < len(t); j++ {
-				if !yield(t[i], t[j]) {
-					return
-				}
-			}
-		}
-	}
-}
-
 // sudokuRules adds Sudoku rules to the solver.
 //
 //nolint:gocognit,cyclop
 func sudokuRules(s *sat.CDCLSolver) {
 	for i := range 9 {
 		for j := range 9 {
-			literals := make([]*sat.Literal, 9)
-			negated := make([]*sat.Literal, 9)
+			names := make([]string, 9)
 
 			for n := range 9 {
-				literals[n] = s.Literal(varName(i, j, n))
-				negated[n] = s.NegatedLiteral(varName(i, j, n))
+				names[n] = varName(i, j, n)
 			}
 
-			// Every cell must have a value. e.g:
-			//
-			//   0 v 2 v 3 v 4 v 5 v 6 v 7 v 8
-			s.Clause(literals...)
-
-			// Every cell can only have one value.  e.g.
-			//
-			//   ^0 v ^1 (false if both 0 and 1 are set)
-			//   ^0 v ^2 (false if both 0 and 2 are set)
-			//   ...
-			for a, b := range permute(negated) {
-				s.Clause(a, b)
-			}
+			// Every cell must have one value.
+			s.AtLeastOneOf(names...)
+			s.AtMostOneOf(names...)
 		}
 
 		// In every row a value can only occur once.
 		for n := range 9 {
-			literals := make([]*sat.Literal, 9)
+			names := make([]string, 9)
 
 			for j := range 9 {
-				literals[j] = s.NegatedLiteral(varName(i, j, n))
+				names[j] = varName(i, j, n)
 			}
 
-			for a, b := range permute(literals) {
-				s.Clause(a, b)
-			}
+			s.AtMostOneOf(names...)
 		}
 	}
 
 	// In every column a value can only occur once.
 	for j := range 9 {
 		for n := range 9 {
-			literals := make([]*sat.Literal, 9)
+			names := make([]string, 9)
 
 			for i := range 9 {
-				literals[i] = s.NegatedLiteral(varName(i, j, n))
+				names[i] = varName(i, j, n)
 			}
 
-			for a, b := range permute(literals) {
-				s.Clause(a, b)
-			}
+			s.AtMostOneOf(names...)
 		}
 	}
 
@@ -117,17 +88,15 @@ func sudokuRules(s *sat.CDCLSolver) {
 	for i := 0; i < 9; i += 3 {
 		for j := 0; j < 9; j += 3 {
 			for n := range 9 {
-				literals := make([]*sat.Literal, 0, 9)
+				names := make([]string, 0, 9)
 
 				for x := range 3 {
 					for y := range 3 {
-						literals = append(literals, s.NegatedLiteral(varName(i+x, j+y, n)))
+						names = append(names, varName(i+x, j+y, n))
 					}
 				}
 
-				for a, b := range permute(literals) {
-					s.Clause(a, b)
-				}
+				s.AtMostOneOf(names...)
 			}
 		}
 	}
@@ -137,7 +106,7 @@ func sudokuInitialize(s *sat.CDCLSolver) {
 	for i := range 9 {
 		for j := range 9 {
 			if sudoku[i][j] > 0 {
-				s.Clause(s.Literal(varName(i, j, sudoku[i][j]-1)))
+				s.Unary(varName(i, j, sudoku[i][j]-1))
 			}
 		}
 	}
