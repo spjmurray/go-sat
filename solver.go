@@ -67,14 +67,400 @@ func (s Set[T]) AllSortedFunc(cmp func(T, T) int) iter.Seq[T] {
 	}
 }
 
-// PartialClause is used during conflic resolution to resolve a new clause.
+// Boolean wraps up a boolean variable which may be undefined.
+type Boolean struct {
+	// value of the boolean, nil is undefined
+	value *bool
+	// subscribers are the list of clients subscribed to monitor changes.
+	subscribers []subscribeFn
+}
+
+type subscribeFn func(Boolean)
+
+func (b Boolean) Undefined() bool {
+	return b.value == nil
+}
+
+func (b Boolean) Defined() bool {
+	return b.value != nil
+}
+
+func (b Boolean) Value() bool {
+	return b.Defined() && *b.value
+}
+
+// subscribe registers the callback function and calls it to communicate the initial value.
+func (b *Boolean) subscribe(callback subscribeFn) {
+	b.subscribers = append(b.subscribers, callback)
+
+	callback(*b)
+}
+
+func (b *Boolean) notify() {
+	for _, f := range b.subscribers {
+		f(*b)
+	}
+}
+
+func (b *Boolean) define(value bool) {
+	b.value = &value
+	b.notify()
+}
+
+func (b *Boolean) undefine() {
+	b.value = nil
+	b.notify()
+}
+
+// variable represents a boolean variable.
+type variable struct {
+	// Boolean allows the variable to notify subscribers of updates.
+	Boolean
+	// name is the short variable name e.g. v1, v6.
+	name string
+	// extName is the external name set by the user.
+	extName string
+}
+
+func newVariable(name, extName string) *variable {
+	return &variable{
+		name:    name,
+		extName: extName,
+	}
+}
+
+func (v *variable) String() string {
+	head := ""
+	tail := ""
+
+	if v.Defined() {
+		tail = "\x1b[0m"
+
+		if v.Value() {
+			head = "\x1b[1;32m"
+		} else {
+			head = "\x1b[1;31m"
+		}
+	}
+
+	return head + v.name + tail
+}
+
+// variableSet controls variable allocation and mapping.
+type variableSet struct {
+	// variables is a set of variables indexed by an external naming scheme.
+	// e.g. x0:y0:5 for a Sudoku solver.
+	variables map[string]*variable
+	// list is an ordered list of variables.
+	list []*variable
+	// counter is a monotonic counter for creating debug names for variables.
+	counter int
+}
+
+func newVariableSet() *variableSet {
+	return &variableSet{
+		variables: map[string]*variable{},
+	}
+}
+
+// get returns an existing or new variable based on an external name.
+func (s *variableSet) get(name string) *variable {
+	if v, ok := s.variables[name]; ok {
+		return v
+	}
+
+	v := newVariable(fmt.Sprint("v", s.counter), name)
+
+	s.list = append(s.list, v)
+	s.variables[name] = v
+	s.counter++
+
+	return v
+}
+
+// Complete returns whether or not all variables are set.
+func (s *variableSet) complete() bool {
+	for _, variable := range s.list {
+		if variable.Undefined() {
+			return false
+		}
+	}
+
+	return true
+}
+
+func (s *variableSet) String() string {
+	t := make([]string, len(s.list))
+
+	for i, v := range s.list {
+		t[i] = v.String()
+	}
+
+	return strings.Join(t, ", ")
+}
+
+func (s *variableSet) dump() {
+	fmt.Println("Variables:")
+	fmt.Println(s)
+}
+
+// Literal is a reference to a variable used by a clause.
+type Literal struct {
+	// Boolean allows the variable to notify subscribers of updates.
+	Boolean
+	// variable is a reference to the underlying variable.
+	variable *variable
+	// negated is whether or not the boolean value is negated.
+	negated bool
+}
+
+func newLiteral(variable *variable, negated bool) *Literal {
+	l := &Literal{
+		variable: variable,
+		negated:  negated,
+	}
+
+	variable.subscribe(l.update)
+
+	return l
+}
+
+// update accespts updates from the underlying variable, does any necessary
+// mutations due to negation, then notifies any subscribed clauses.
+func (l *Literal) update(v Boolean) {
+	if v.Defined() {
+		l.Boolean.define(v.Value() != l.negated)
+	} else {
+		l.Boolean.undefine()
+	}
+}
+
+// define sets the literal to a specific value, and writes through to the
+// underlying variable paying attention to any negation.  The local value
+// wiill be updated by the subscription callback.
+func (l *Literal) define(value bool) {
+	// This is an XOR in essence.
+	l.variable.define(value != l.negated)
+}
+
+func (l *Literal) String() string {
+	head := ""
+	tail := ""
+
+	if l.Defined() {
+		tail = "\x1b[0m"
+
+		if l.Value() {
+			head = "\x1b[1;32m"
+		} else {
+			head = "\x1b[1;31m"
+		}
+	}
+
+	negation := ""
+
+	if l.negated {
+		negation = "¬"
+	}
+
+	return head + negation + l.variable.name + tail
+}
+
+// clause is a logical OR of literals.
+type clause struct {
+	// Boolean allows the variable to notify subscribers of updates.
+	Boolean
+	// name is the name of the clause.
+	name string
+	// literals is an ordered list of all iterals that make up the clause.
+	literals []*Literal
+	// numDefined is a count of the number of defined literals.
+	numDefined int
+	// bitfield records the boolean values of all the literals (upto 64 for now...)
+	bitfield []int64
+	// initialized is used for consistency of the defined count.
+	initialized bool
+}
+
+func newClause(literals ...*Literal) *clause {
+	// The maths for the bitfield is quite simple.
+	// ((1 + 63) >> 6) = (64 >> 6) = 1
+	// ((64 + 63) >> 6) = (127 >> 6) = 1
+	words := (len(literals) + 63) >> 6
+
+	c := &clause{
+		literals: literals,
+		bitfield: make([]int64, words),
+	}
+
+	for i := range literals {
+		update := func(s Boolean) {
+			c.update(i, s)
+		}
+
+		literals[i].subscribe(update)
+	}
+
+	c.initialized = true
+
+	return c
+}
+
+func (c clause) String() string {
+	s := make([]string, len(c.literals))
+
+	for i := range c.literals {
+		s[i] = c.literals[i].String()
+	}
+
+	head := ""
+	tail := ""
+
+	if c.Complete() || c.Value() {
+		if c.Value() {
+			head = "\x1b[1;32m"
+		} else {
+			head = "\x1b[1;31m"
+		}
+
+		tail = "\x1b[0m"
+	}
+
+	return head + c.name + tail + ": " + strings.Join(s, " ∨ ")
+}
+
+// Complete tells us whether all literals are set.
+func (c *clause) Complete() bool {
+	return c.numDefined == len(c.literals)
+}
+
+// Unit tells us if one literal is unset and it has to be true.
+func (c *clause) Unit() bool {
+	return c.numDefined == len(c.literals)-1 && !c.Value()
+}
+
+// Value tells us whether there is a conflict (false), or not.
+func (c *clause) Value() bool {
+	for _, i := range c.bitfield {
+		if i != 0 {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (c *clause) update(i int, s Boolean) {
+	word := i >> 6
+	bit := i & 0x3f
+
+	// Zero out the bit unconditionally, this handles when the value
+	// is undefined and when defined but false.
+	c.bitfield[word] &= ^(1 << bit)
+
+	// If something is defined either during initialization or as pert
+	// of normal operation, update the counts and values.
+	if s.Defined() {
+		c.numDefined++
+
+		if s.Value() {
+			c.bitfield[word] |= 1 << bit
+		}
+	}
+
+	// Only update the defined count after initialization, otherwise
+	// you'll end up with negative counts!
+	if s.Undefined() && c.initialized {
+		c.numDefined--
+	}
+
+	// Propagate the new value up to any subscribers.
+	if c.Complete() || c.Value() {
+		c.define(c.Value())
+	} else {
+		c.undefine()
+	}
+}
+
+// partial returns a partial clause for conflict resolution.
+func (c *clause) partial() partialclause {
+	r := partialclause{}
+
+	for _, literal := range c.literals {
+		r[literal.variable] = literal.negated
+	}
+
+	return r
+}
+
+// clauseList wraps up handling of clauses.
+type clauseList struct {
+	// counter is used to name clauses for determinism.
+	counter int
+	// items are all the clauses in list.
+	items []*clause
+	// unit are clauses that have one missing literal and have a value
+	// of false, meaning the remaining one needs to be true.
+	unit Set[*clause]
+	// conflicts are updated by subscriptions on the clause.
+	conflicts Set[*clause]
+}
+
+func newClauseList() *clauseList {
+	return &clauseList{
+		unit:      Set[*clause]{},
+		conflicts: Set[*clause]{},
+	}
+}
+
+// Add appends a new clause to the list.
+func (l *clauseList) add(c *clause) {
+	name := fmt.Sprint("c", l.counter)
+	l.counter++
+
+	c.name = name
+
+	l.items = append(l.items, c)
+
+	update := func(s Boolean) {
+		l.update(c, s)
+	}
+
+	c.subscribe(update)
+}
+
+func (l *clauseList) update(c *clause, s Boolean) {
+	// Do conflict detection.
+	if s.Defined() && !s.Value() {
+		l.conflicts.Add(c)
+	} else {
+		l.conflicts.Delete(c)
+	}
+
+	// Do unit detection.
+	if c.Unit() {
+		l.unit.Add(c)
+	} else {
+		l.unit.Delete(c)
+	}
+}
+
+func (l *clauseList) dump() {
+	fmt.Println("clauses:")
+
+	for i, c := range l.items {
+		fmt.Println(i, ":", c.Value(), c)
+	}
+}
+
+// partialclause is used during conflic resolution to resolve a new clause.
 // It maps the variable to whether or not it's negated.
-type PartialClause map[*Variable]bool
+type partialclause map[*variable]bool
 
 // resolve combines two partial clauses such that (^A v B v C) and (A, D, ^E)
 // combine to form (B v C v D v ^E) i.e. ^A and A cancel each other out.
-func (p PartialClause) resolve(o PartialClause) PartialClause {
-	r := PartialClause{}
+func (p partialclause) resolve(o partialclause) partialclause {
+	r := partialclause{}
 
 	for name, negated := range p {
 		r[name] = negated
@@ -93,7 +479,7 @@ func (p PartialClause) resolve(o PartialClause) PartialClause {
 	return r
 }
 
-func (p PartialClause) String() string {
+func (p partialclause) String() string {
 	s := make([]string, 0, len(p))
 
 	for name, negated := range p {
@@ -109,407 +495,6 @@ func (p PartialClause) String() string {
 	return strings.Join(s, " v ")
 }
 
-// BooleanState wraps up a boolean variable or roll up.
-type BooleanState struct {
-	// defined is whether the value is defined.
-	defined bool
-	// value is the value of the boolean when defined.
-	value bool
-}
-
-func (s *BooleanState) Define(value bool) {
-	s.defined = true
-	s.value = value
-}
-
-func (s *BooleanState) Undefine() {
-	s.defined = false
-}
-
-type SubscribeFn func(*BooleanState)
-
-// BooleanStatePublisher allows others to subscribe to updates of
-// the boolean state.
-type BooleanStatePublisher struct {
-	// state is the state of the variable.
-	state BooleanState
-	// handle is an ID used to identify a subscriber so it can unsubscribe.
-	handle int
-	// subscribers are the list of clients subscribed to monitor changes.
-	subscribers map[int]SubscribeFn
-}
-
-// Subscribe registers the callback function and calls it to communicate the initial state.
-func (p *BooleanStatePublisher) Subscribe(callback SubscribeFn) int {
-	if p.subscribers == nil {
-		p.subscribers = map[int]SubscribeFn{}
-	}
-
-	handle := p.handle
-	p.handle++
-
-	p.subscribers[handle] = callback
-
-	callback(&p.state)
-
-	return handle
-}
-
-// Unsubscribe removes the subscription.
-func (p *BooleanStatePublisher) Unsubscribe(handle int) {
-	delete(p.subscribers, handle)
-}
-
-// Define defines the value and notifies subscribers.
-func (p *BooleanStatePublisher) Define(value bool) {
-	p.state.Define(value)
-	p.notify()
-}
-
-// Undefine undefines the value and notifies subscribers.
-func (p *BooleanStatePublisher) Undefine() {
-	p.state.Undefine()
-	p.notify()
-}
-
-func (p *BooleanStatePublisher) notify() {
-	for _, f := range p.subscribers {
-		f(&p.state)
-	}
-}
-
-// Variable represents a boolean variable.
-type Variable struct {
-	// BooleanStatePublisher allows the variable to notify subscribers of updates.
-	BooleanStatePublisher
-	// name is the short variable name e.g. v1, v6.
-	name string
-	// extName is the external name set by the user.
-	extName string
-}
-
-func NewVariable(name, extName string) *Variable {
-	return &Variable{
-		name:    name,
-		extName: extName,
-	}
-}
-
-func (v *Variable) String() string {
-	head := ""
-	tail := ""
-
-	if v.state.defined {
-		tail = "\x1b[0m"
-
-		if v.state.value {
-			head = "\x1b[1;32m"
-		} else {
-			head = "\x1b[1;31m"
-		}
-	}
-
-	return head + v.name + tail
-}
-
-// VariableSet controls variable allocation and mapping.
-type VariableSet struct {
-	// variables is a set of variables indexed by an external naming scheme.
-	// e.g. x0:y0:5 for a Sudoku solver.
-	variables map[string]*Variable
-	// list is an ordered list of variables.
-	list []*Variable
-	// counter is a monotonic counter for creating debug names for variables.
-	counter int
-}
-
-func NewVariableSet() *VariableSet {
-	return &VariableSet{
-		variables: map[string]*Variable{},
-	}
-}
-
-// get returns an existing or new variable based on an external name.
-func (s *VariableSet) get(name string) *Variable {
-	if v, ok := s.variables[name]; ok {
-		return v
-	}
-
-	v := NewVariable(fmt.Sprint("v", s.counter), name)
-
-	s.list = append(s.list, v)
-	s.variables[name] = v
-	s.counter++
-
-	return v
-}
-
-// Complete returns whether or not all variables are set.
-func (s *VariableSet) Complete() bool {
-	for _, variable := range s.list {
-		if !variable.state.defined {
-			return false
-		}
-	}
-
-	return true
-}
-
-func (s *VariableSet) String() string {
-	t := make([]string, len(s.list))
-
-	for i, v := range s.list {
-		t[i] = v.String()
-	}
-
-	return strings.Join(t, ", ")
-}
-
-func (s *VariableSet) Dump() {
-	fmt.Println("Variables:")
-	fmt.Println(s)
-}
-
-// Literal is a reference to a variable used by a clause.
-type Literal struct {
-	// BooleanStatePublisher allows the variable to notify subscribers of updates.
-	BooleanStatePublisher
-	// variable is a reference to the underlying variable.
-	variable *Variable
-	// negated is whether or not the boolean value is negated.
-	negated bool
-}
-
-func NewLiteral(variable *Variable, negated bool) *Literal {
-	l := &Literal{
-		variable: variable,
-		negated:  negated,
-	}
-
-	variable.Subscribe(l.update)
-
-	return l
-}
-
-// update accespts updates from the underlying variable, does any necessary
-// mutations due to negation, then notifies any subscribed clauses.
-func (l *Literal) update(s *BooleanState) {
-	l.state = *s
-
-	if l.negated {
-		l.state.value = !l.state.value
-	}
-
-	l.notify()
-}
-
-// Define sets the literal to a specific value, and writes through to the
-// underlying variable paying attention to any negation.  The local state
-// wiill be updated by the subscription callback.
-func (l *Literal) Define(value bool) {
-	if l.negated {
-		value = !value
-	}
-
-	l.variable.Define(value)
-}
-
-func (l *Literal) String() string {
-	head := ""
-	tail := ""
-
-	if l.state.defined {
-		tail = "\x1b[0m"
-
-		if l.state.value {
-			head = "\x1b[1;32m"
-		} else {
-			head = "\x1b[1;31m"
-		}
-	}
-
-	negation := ""
-
-	if l.negated {
-		negation = "¬"
-	}
-
-	return head + negation + l.variable.name + tail
-}
-
-// Clause is a logical OR of literals.
-type Clause struct {
-	// BooleanStatePublisher allows the variable to notify subscribers of updates.
-	BooleanStatePublisher
-	// name is the name of the clause.
-	name string
-	// literals is an ordered list of all iterals that make up the clause.
-	literals []*Literal
-	// defined is a count of the number of defined literals.
-	defined int
-	// bitfield records the boolean states of all the literals (upto 64 for now...)
-	bitfield []int64
-	// initialized is used for consistency of the defined count.
-	initialized bool
-}
-
-func NewClause(literals ...*Literal) *Clause {
-	// The maths for the bitfield is quite simple.
-	// ((1 + 63) >> 6) = (64 >> 6) = 1
-	// ((64 + 63) >> 6) = (127 >> 6) = 1
-	words := (len(literals) + 63) >> 6
-
-	c := &Clause{
-		literals: literals,
-		bitfield: make([]int64, words),
-	}
-
-	for i := range literals {
-		update := func(s *BooleanState) {
-			c.update(i, s)
-		}
-
-		literals[i].Subscribe(update)
-	}
-
-	c.initialized = true
-
-	return c
-}
-
-func (c Clause) String() string {
-	s := make([]string, len(c.literals))
-
-	for i := range c.literals {
-		s[i] = c.literals[i].String()
-	}
-
-	return fmt.Sprint(c.defined, len(c.literals)) + " " + strings.Join(s, " ∨ ")
-}
-
-// Complete tells us whether all literals are set.
-func (c *Clause) Complete() bool {
-	return c.defined == len(c.literals)
-}
-
-// Unit tells us if one literal is unset and it has to be true.
-func (c *Clause) Unit() bool {
-	return !c.state.value && c.defined == len(c.literals)-1
-}
-
-// Value tells us whether there is a conflict (false), or not.
-func (c *Clause) Value() bool {
-	for _, i := range c.bitfield {
-		if i != 0 {
-			return true
-		}
-	}
-
-	return false
-}
-
-func (c *Clause) update(i int, s *BooleanState) {
-	word := i >> 6
-	bit := i & 0x3f
-
-	// Zero out the bit unconditionally, this handles when the value
-	// is undefined and when defined but false.
-	c.bitfield[word] &= ^(1 << bit)
-
-	// If something is defined either during initialization or as pert
-	// of normal operation, update the counts and values.
-	if s.defined {
-		c.defined++
-
-		if s.value {
-			c.bitfield[word] |= 1 << bit
-		}
-	}
-
-	// Only update the defined count after initialization, otherwise
-	// you'll end up with negative counts!
-	if !s.defined && c.initialized {
-		c.defined--
-	}
-
-	// Propagate the new state up to any subscribers.
-	c.state.defined = c.Complete()
-	c.state.value = c.Value()
-
-	c.notify()
-}
-
-// Partial returns a partial clause for conflict resolution.
-func (c *Clause) Partial() PartialClause {
-	r := PartialClause{}
-
-	for _, literal := range c.literals {
-		r[literal.variable] = literal.negated
-	}
-
-	return r
-}
-
-// ClauseList wraps up handling of clauses.
-type ClauseList struct {
-	// counter is used to name clauses for determinism.
-	counter int
-	// items are all the clauses in list.
-	items []*Clause
-	// unit are clauses that have one missing literal and have a value
-	// of false, meaning the remaining one needs to be true.
-	unit Set[*Clause]
-	// conflicts are updated by subscriptions on the clause.
-	conflicts Set[*Clause]
-}
-
-func NewClauseList() *ClauseList {
-	return &ClauseList{
-		unit:      Set[*Clause]{},
-		conflicts: Set[*Clause]{},
-	}
-}
-
-// Add appends a new clause to the list.
-func (l *ClauseList) Add(c *Clause) {
-	name := fmt.Sprint("c", l.counter)
-	l.counter++
-
-	c.name = name
-
-	l.items = append(l.items, c)
-
-	update := func(s *BooleanState) {
-		l.update(c, s)
-	}
-
-	c.Subscribe(update)
-}
-
-func (l *ClauseList) update(c *Clause, s *BooleanState) {
-	// Do conflict detection.
-	if s.defined && !s.value {
-		l.conflicts.Add(c)
-	} else {
-		l.conflicts.Delete(c)
-	}
-
-	// Do unit detection.
-	if c.Unit() {
-		l.unit.Add(c)
-	} else {
-		l.unit.Delete(c)
-	}
-}
-
-func (l *ClauseList) Dump() {
-	fmt.Println("Clauses:")
-
-	for i, c := range l.items {
-		fmt.Println(i, ":", c.Value(), c)
-	}
-}
-
 // pathEntry remembers decisions made as we attempt to solve the SAT problem.
 type pathEntry struct {
 	// decision did this result from a decision, rather than BCP?
@@ -517,9 +502,9 @@ type pathEntry struct {
 	// level that the entry was created at.
 	level int
 	// variable that was set.
-	variable *Variable
+	variable *variable
 	// clause (where set by BCP) that caused the inference.
-	clause *Clause
+	clause *clause
 }
 
 func (e *pathEntry) String() string {
@@ -532,24 +517,24 @@ func (e *pathEntry) String() string {
 	return fmt.Sprint(e.variable.name, "@", e.level, " ", cause)
 }
 
-// Path remembers decisions and inferences made and what made them.
-type Path struct {
+// path remembers decisions and inferences made and what made them.
+type path struct {
 	entries []pathEntry
 }
 
-func NewPath() *Path {
-	return &Path{}
+func newPath() *path {
+	return &path{}
 }
 
-func (p *Path) Dump() {
-	fmt.Println("Path:")
+func (p *path) dump() {
+	fmt.Println("path:")
 
 	for _, entry := range p.entries {
 		fmt.Println(entry.String())
 	}
 }
 
-func (p *Path) Push(decision bool, level int, variable *Variable, clause *Clause) {
+func (p *path) push(decision bool, level int, variable *variable, clause *clause) {
 	p.entries = append(p.entries, pathEntry{
 		decision: decision,
 		level:    level,
@@ -560,13 +545,13 @@ func (p *Path) Push(decision bool, level int, variable *Variable, clause *Clause
 
 // Rollback accepts a level to roll back to and removes all entries defined
 // after that level, performing any cleanup necessary.
-func (p *Path) Rollback(level int) {
+func (p *path) rollback(level int) {
 	i := slices.IndexFunc(p.entries, func(entry pathEntry) bool {
 		return entry.level > level
 	})
 
 	for _, entry := range p.entries[i:] {
-		entry.variable.Undefine()
+		entry.variable.undefine()
 	}
 
 	p.entries = p.entries[:i]
@@ -575,44 +560,44 @@ func (p *Path) Rollback(level int) {
 // CDCLSolver implements CDCL (conflict driven clause learning).
 type CDCLSolver struct {
 	// variables reference by clause literals.
-	variables *VariableSet
+	variables *variableSet
 	// clauses that make up the CNF (conjunctive noraml form).
-	clauses *ClauseList
+	clauses *clauseList
 	// path that acts as a journal of our decisions and how we arrived there.
-	path *Path
+	path *path
 	// level is the decision level.
 	level int
 }
 
 func NewCDCLSolver() *CDCLSolver {
 	return &CDCLSolver{
-		variables: NewVariableSet(),
-		clauses:   NewClauseList(),
-		path:      NewPath(),
+		variables: newVariableSet(),
+		clauses:   newClauseList(),
+		path:      newPath(),
 	}
 }
 
 func (s *CDCLSolver) Literal(name string) *Literal {
-	return NewLiteral(s.variables.get(name), false)
+	return newLiteral(s.variables.get(name), false)
 }
 
 func (s *CDCLSolver) NegatedLiteral(name string) *Literal {
-	return NewLiteral(s.variables.get(name), true)
+	return newLiteral(s.variables.get(name), true)
 }
 
 func (s *CDCLSolver) Clause(literals ...*Literal) {
-	s.clauses.Add(NewClause(literals...))
+	s.clauses.add(newClause(literals...))
 }
 
 func (s *CDCLSolver) Dump() {
-	s.variables.Dump()
-	s.clauses.Dump()
-	s.path.Dump()
+	s.variables.dump()
+	s.clauses.dump()
+	s.path.dump()
 }
 
 // conflict returns true if a conflict has been detected and the clause
 // that caused it.
-func (s *CDCLSolver) conflict() (*Clause, bool) {
+func (s *CDCLSolver) conflict() (*clause, bool) {
 	// TODO: deterministic option?
 	for clause := range s.clauses.conflicts.All() {
 		return clause, true
@@ -627,9 +612,10 @@ func (s *CDCLSolver) bcpSingle() bool {
 	for clause := range s.clauses.unit.All() {
 		// Find the unset literal and make it true...
 		for _, literal := range clause.literals {
-			if !literal.state.defined {
-				literal.Define(true)
-				s.path.Push(false, s.level, literal.variable, clause)
+			if literal.Undefined() {
+				literal.define(true)
+
+				s.path.push(false, s.level, literal.variable, clause)
 
 				return true
 			}
@@ -641,7 +627,7 @@ func (s *CDCLSolver) bcpSingle() bool {
 
 // bcp performs BCP while it can, or until a conflict is detected.
 // Returns true on a conflict and the clause that caused the conflict.
-func (s *CDCLSolver) bcp() (*Clause, bool) {
+func (s *CDCLSolver) bcp() (*clause, bool) {
 	for s.bcpSingle() {
 		if clause, ok := s.conflict(); ok {
 			return clause, true
@@ -655,7 +641,7 @@ func (s *CDCLSolver) bcp() (*Clause, bool) {
 // the partial that were set at the current level.  When this hits 1 we've finished
 // resolution.  While we are at it, we also keep tabs on the asserting level we will
 // need to roll back to.
-func (s *CDCLSolver) partialVariablesAtCurrentLevel(partial PartialClause, assertingLevel *int) int {
+func (s *CDCLSolver) partialVariablesAtCurrentLevel(partial partialclause, assertingLevel *int) int {
 	var count int
 
 	var level int
@@ -678,8 +664,8 @@ func (s *CDCLSolver) partialVariablesAtCurrentLevel(partial PartialClause, asser
 	return count
 }
 
-func (s *CDCLSolver) handleConflict(clause *Clause) {
-	partial := clause.Partial()
+func (s *CDCLSolver) handleConflict(clause *clause) {
+	partial := clause.partial()
 
 	var assertingLevel int
 
@@ -690,7 +676,7 @@ func (s *CDCLSolver) handleConflict(clause *Clause) {
 		}
 
 		// If it does, then resolve the new partial.
-		partial = partial.resolve(entry.clause.Partial())
+		partial = partial.resolve(entry.clause.partial())
 
 		// If the partial only contains a single variable at the current
 		// decision level, then we are done!
@@ -700,20 +686,20 @@ func (s *CDCLSolver) handleConflict(clause *Clause) {
 	}
 
 	// Perform the rollback before we add the new clause so we get the pub/sub
-	// into a sane state, otherwise the new clause will probably see undefines
+	// into a sane value, otherwise the new clause will probably see undefines
 	// it shouldn't.
 	s.level = assertingLevel
-	s.path.Rollback(assertingLevel)
+	s.path.rollback(assertingLevel)
 
 	// Finally add our new clause.
 	l := make([]*Literal, 0, len(partial))
 
 	// TODO: deterministic option?
 	for variable := range partial {
-		l = append(l, NewLiteral(variable, partial[variable]))
+		l = append(l, newLiteral(variable, partial[variable]))
 	}
 
-	s.clauses.Add(NewClause(l...))
+	s.clauses.add(newClause(l...))
 }
 
 // Solve does the top level solving of the SAT problem.  It accepts a custom
@@ -721,22 +707,24 @@ func (s *CDCLSolver) handleConflict(clause *Clause) {
 // trial and error is required.  For example, you may maintain some domain
 // specific knowledge about variables and clauses and be able to make more
 // sensible choices than an arbitrary selector.
-func (s *CDCLSolver) Solve(decide func(*VariableSet, *ClauseList) (*Variable, bool)) bool {
+func (s *CDCLSolver) Solve(decide func(*CDCLSolver) (string, bool)) bool {
 	// Do an initial boolean constant propagation.
 	if _, conflict := s.bcp(); conflict {
 		return false
 	}
 
 	// Until we've fully defined all variables.
-	for !s.variables.Complete() {
+	for !s.variables.complete() {
 		// Increase the decision level and select a variable to set, we need
 		// to guess here as BCP cannot complete the task by itself.
 		s.level++
 
-		variable, value := decide(s.variables, s.clauses)
+		name, value := decide(s)
 
-		variable.Define(value)
-		s.path.Push(true, s.level, variable, nil)
+		variable := s.variables.get(name)
+		variable.define(value)
+
+		s.path.push(true, s.level, variable, nil)
 
 		for {
 			// If BCP has done all it can after the last guess,
@@ -753,22 +741,22 @@ func (s *CDCLSolver) Solve(decide func(*VariableSet, *ClauseList) (*Variable, bo
 	return true
 }
 
-func (s *CDCLSolver) Variables() iter.Seq2[string, bool] {
-	return func(yield func(string, bool) bool) {
+func (s *CDCLSolver) Variables() iter.Seq2[string, Boolean] {
+	return func(yield func(string, Boolean) bool) {
 		for _, v := range s.variables.list {
-			if !yield(v.extName, v.state.value) {
+			if !yield(v.extName, v.Boolean) {
 				return
 			}
 		}
 	}
 }
 
-func DefaultChooser(v *VariableSet, _ *ClauseList) (*Variable, bool) {
-	for _, v := range v.list {
-		if !v.state.defined {
-			return v, false
+func DefaultChooser(s *CDCLSolver) (string, bool) {
+	for name, v := range s.Variables() {
+		if v.Undefined() {
+			return name, false
 		}
 	}
 
-	return nil, false
+	panic("failed to select a variable")
 }
