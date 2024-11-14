@@ -67,6 +67,19 @@ func (s Set[T]) AllSortedFunc(cmp func(T, T) int) iter.Seq[T] {
 	}
 }
 
+// Permute returns an iterator over all possible unique pairs of a slice members.
+func Permute[T any](t []T) iter.Seq2[T, T] {
+	return func(yield func(T, T) bool) {
+		for i := range t {
+			for j := i + 1; j < len(t); j++ {
+				if !yield(t[i], t[j]) {
+					return
+				}
+			}
+		}
+	}
+}
+
 // Boolean wraps up a boolean variable which may be undefined.
 type Boolean struct {
 	// value of the boolean, nil is undefined
@@ -577,16 +590,55 @@ func NewCDCLSolver() *CDCLSolver {
 	}
 }
 
+// Literal gets a literal for use in a clause.
 func (s *CDCLSolver) Literal(name string) *Literal {
 	return newLiteral(s.variables.get(name), false)
 }
 
+// NegatedLiteral gets a negated literal for use in a clause.
 func (s *CDCLSolver) NegatedLiteral(name string) *Literal {
 	return newLiteral(s.variables.get(name), true)
 }
 
+// Clause defines a new clause from a set of literals.
 func (s *CDCLSolver) Clause(literals ...*Literal) {
 	s.clauses.add(newClause(literals...))
+}
+
+// Unary adds a unary clause e.g. this must be true.
+func (s *CDCLSolver) Unary(name string) {
+	s.Clause(s.Literal(name))
+}
+
+// NegatedUnary adds a negated unary clause e.g. this must be false.
+func (s *CDCLSolver) NegatedUnary(name string) {
+	s.Clause(s.NegatedLiteral(name))
+}
+
+// AtLeastOneOf is a helper that defines a clause:
+// x1 v x2 v x3 v ... xN.
+func (s *CDCLSolver) AtLeastOneOf(names ...string) {
+	l := make([]*Literal, len(names))
+
+	for i, name := range names {
+		l[i] = s.Literal(name)
+	}
+
+	s.Clause(l...)
+}
+
+// AtMostOneOf is a helper that defines a set of clauses:
+// ^x1 v ^x2, ^x1 v ^x3, ..., ^xN-1 v ^xN.
+func (s *CDCLSolver) AtMostOneOf(names ...string) {
+	l := make([]*Literal, len(names))
+
+	for i, name := range names {
+		l[i] = s.NegatedLiteral(name)
+	}
+
+	for a, b := range Permute(l) {
+		s.Clause(a, b)
+	}
 }
 
 func (s *CDCLSolver) Dump() {
