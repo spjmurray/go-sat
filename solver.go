@@ -126,23 +126,23 @@ func (b *Boolean) undefine() {
 }
 
 // variable represents a boolean variable.
-type variable struct {
+type variable[T comparable] struct {
 	// Boolean allows the variable to notify subscribers of updates.
 	Boolean
 	// name is the short variable name e.g. v1, v6.
 	name string
-	// extName is the external name set by the user.
-	extName string
+	// userinfo is a user defined type used to compare variables.
+	userinfo T
 }
 
-func newVariable(name, extName string) *variable {
-	return &variable{
-		name:    name,
-		extName: extName,
+func newVariable[T comparable](name string, userinfo T) *variable[T] {
+	return &variable[T]{
+		name:     name,
+		userinfo: userinfo,
 	}
 }
 
-func (v *variable) String() string {
+func (v *variable[T]) String() string {
 	head := ""
 	tail := ""
 
@@ -160,39 +160,39 @@ func (v *variable) String() string {
 }
 
 // variableSet controls variable allocation and mapping.
-type variableSet struct {
+type variableSet[T comparable] struct {
 	// variables is a set of variables indexed by an external naming scheme.
 	// e.g. x0:y0:5 for a Sudoku solver.
-	variables map[string]*variable
+	variables map[T]*variable[T]
 	// list is an ordered list of variables.
-	list []*variable
+	list []*variable[T]
 	// counter is a monotonic counter for creating debug names for variables.
 	counter int
 }
 
-func newVariableSet() *variableSet {
-	return &variableSet{
-		variables: map[string]*variable{},
+func newVariableSet[T comparable]() *variableSet[T] {
+	return &variableSet[T]{
+		variables: map[T]*variable[T]{},
 	}
 }
 
 // get returns an existing or new variable based on an external name.
-func (s *variableSet) get(name string) *variable {
-	if v, ok := s.variables[name]; ok {
+func (s *variableSet[T]) get(t T) *variable[T] {
+	if v, ok := s.variables[t]; ok {
 		return v
 	}
 
-	v := newVariable(fmt.Sprint("v", s.counter), name)
+	v := newVariable(fmt.Sprint("v", s.counter), t)
 
 	s.list = append(s.list, v)
-	s.variables[name] = v
+	s.variables[t] = v
 	s.counter++
 
 	return v
 }
 
 // Complete returns whether or not all variables are set.
-func (s *variableSet) complete() bool {
+func (s *variableSet[T]) complete() bool {
 	for _, variable := range s.list {
 		if variable.Undefined() {
 			return false
@@ -202,7 +202,7 @@ func (s *variableSet) complete() bool {
 	return true
 }
 
-func (s *variableSet) String() string {
+func (s *variableSet[T]) String() string {
 	t := make([]string, len(s.list))
 
 	for i, v := range s.list {
@@ -212,23 +212,23 @@ func (s *variableSet) String() string {
 	return strings.Join(t, ", ")
 }
 
-func (s *variableSet) dump() {
+func (s *variableSet[T]) dump() {
 	fmt.Println("Variables:")
 	fmt.Println(s)
 }
 
 // Literal is a reference to a variable used by a clause.
-type Literal struct {
+type Literal[T comparable] struct {
 	// Boolean allows the variable to notify subscribers of updates.
 	Boolean
 	// variable is a reference to the underlying variable.
-	variable *variable
+	variable *variable[T]
 	// negated is whether or not the boolean value is negated.
 	negated bool
 }
 
-func newLiteral(variable *variable, negated bool) *Literal {
-	l := &Literal{
+func newLiteral[T comparable](variable *variable[T], negated bool) *Literal[T] {
+	l := &Literal[T]{
 		variable: variable,
 		negated:  negated,
 	}
@@ -240,7 +240,7 @@ func newLiteral(variable *variable, negated bool) *Literal {
 
 // update accespts updates from the underlying variable, does any necessary
 // mutations due to negation, then notifies any subscribed clauses.
-func (l *Literal) update(v Boolean) {
+func (l *Literal[T]) update(v Boolean) {
 	if v.Defined() {
 		l.Boolean.define(v.Value() != l.negated)
 	} else {
@@ -251,12 +251,12 @@ func (l *Literal) update(v Boolean) {
 // define sets the literal to a specific value, and writes through to the
 // underlying variable paying attention to any negation.  The local value
 // wiill be updated by the subscription callback.
-func (l *Literal) define(value bool) {
+func (l *Literal[T]) define(value bool) {
 	// This is an XOR in essence.
 	l.variable.define(value != l.negated)
 }
 
-func (l *Literal) String() string {
+func (l *Literal[T]) String() string {
 	head := ""
 	tail := ""
 
@@ -280,13 +280,13 @@ func (l *Literal) String() string {
 }
 
 // clause is a logical OR of literals.
-type clause struct {
+type clause[T comparable] struct {
 	// Boolean allows the variable to notify subscribers of updates.
 	Boolean
 	// name is the name of the clause.
 	name string
 	// literals is an ordered list of all iterals that make up the clause.
-	literals []*Literal
+	literals []*Literal[T]
 	// numDefined is a count of the number of defined literals.
 	numDefined int
 	// bitfield records the boolean values of all the literals (upto 64 for now...)
@@ -295,13 +295,13 @@ type clause struct {
 	initialized bool
 }
 
-func newClause(literals ...*Literal) *clause {
+func newClause[T comparable](literals ...*Literal[T]) *clause[T] {
 	// The maths for the bitfield is quite simple.
 	// ((1 + 63) >> 6) = (64 >> 6) = 1
 	// ((64 + 63) >> 6) = (127 >> 6) = 1
 	words := (len(literals) + 63) >> 6
 
-	c := &clause{
+	c := &clause[T]{
 		literals: literals,
 		bitfield: make([]int64, words),
 	}
@@ -319,7 +319,7 @@ func newClause(literals ...*Literal) *clause {
 	return c
 }
 
-func (c clause) String() string {
+func (c clause[T]) String() string {
 	s := make([]string, len(c.literals))
 
 	for i := range c.literals {
@@ -343,17 +343,17 @@ func (c clause) String() string {
 }
 
 // Complete tells us whether all literals are set.
-func (c *clause) Complete() bool {
+func (c *clause[T]) Complete() bool {
 	return c.numDefined == len(c.literals)
 }
 
 // Unit tells us if one literal is unset and it has to be true.
-func (c *clause) Unit() bool {
+func (c *clause[T]) Unit() bool {
 	return c.numDefined == len(c.literals)-1 && !c.Value()
 }
 
 // Value tells us whether there is a conflict (false), or not.
-func (c *clause) Value() bool {
+func (c *clause[T]) Value() bool {
 	for _, i := range c.bitfield {
 		if i != 0 {
 			return true
@@ -363,7 +363,7 @@ func (c *clause) Value() bool {
 	return false
 }
 
-func (c *clause) update(i int, s Boolean) {
+func (c *clause[T]) update(i int, s Boolean) {
 	word := i >> 6
 	bit := i & 0x3f
 
@@ -396,8 +396,8 @@ func (c *clause) update(i int, s Boolean) {
 }
 
 // partial returns a partial clause for conflict resolution.
-func (c *clause) partial() partialclause {
-	r := partialclause{}
+func (c *clause[T]) partial() partialclause[T] {
+	r := partialclause[T]{}
 
 	for _, literal := range c.literals {
 		r[literal.variable] = literal.negated
@@ -407,27 +407,27 @@ func (c *clause) partial() partialclause {
 }
 
 // clauseList wraps up handling of clauses.
-type clauseList struct {
+type clauseList[T comparable] struct {
 	// counter is used to name clauses for determinism.
 	counter int
 	// items are all the clauses in list.
-	items []*clause
+	items []*clause[T]
 	// unit are clauses that have one missing literal and have a value
 	// of false, meaning the remaining one needs to be true.
-	unit Set[*clause]
+	unit Set[*clause[T]]
 	// conflicts are updated by subscriptions on the clause.
-	conflicts Set[*clause]
+	conflicts Set[*clause[T]]
 }
 
-func newClauseList() *clauseList {
-	return &clauseList{
-		unit:      Set[*clause]{},
-		conflicts: Set[*clause]{},
+func newClauseList[T comparable]() *clauseList[T] {
+	return &clauseList[T]{
+		unit:      Set[*clause[T]]{},
+		conflicts: Set[*clause[T]]{},
 	}
 }
 
 // Add appends a new clause to the list.
-func (l *clauseList) add(c *clause) {
+func (l *clauseList[T]) add(c *clause[T]) {
 	name := fmt.Sprint("c", l.counter)
 	l.counter++
 
@@ -442,7 +442,7 @@ func (l *clauseList) add(c *clause) {
 	c.subscribe(update)
 }
 
-func (l *clauseList) update(c *clause, s Boolean) {
+func (l *clauseList[T]) update(c *clause[T], s Boolean) {
 	// Do conflict detection.
 	if s.Defined() && !s.Value() {
 		l.conflicts.Add(c)
@@ -458,7 +458,7 @@ func (l *clauseList) update(c *clause, s Boolean) {
 	}
 }
 
-func (l *clauseList) dump() {
+func (l *clauseList[T]) dump() {
 	fmt.Println("clauses:")
 
 	for i, c := range l.items {
@@ -468,12 +468,12 @@ func (l *clauseList) dump() {
 
 // partialclause is used during conflic resolution to resolve a new clause.
 // It maps the variable to whether or not it's negated.
-type partialclause map[*variable]bool
+type partialclause[T comparable] map[*variable[T]]bool
 
 // resolve combines two partial clauses such that (^A v B v C) and (A, D, ^E)
 // combine to form (B v C v D v ^E) i.e. ^A and A cancel each other out.
-func (p partialclause) resolve(o partialclause) partialclause {
-	r := partialclause{}
+func (p partialclause[T]) resolve(o partialclause[T]) partialclause[T] {
+	r := partialclause[T]{}
 
 	for name, negated := range p {
 		r[name] = negated
@@ -492,7 +492,7 @@ func (p partialclause) resolve(o partialclause) partialclause {
 	return r
 }
 
-func (p partialclause) String() string {
+func (p partialclause[T]) String() string {
 	s := make([]string, 0, len(p))
 
 	for name, negated := range p {
@@ -509,18 +509,18 @@ func (p partialclause) String() string {
 }
 
 // pathEntry remembers decisions made as we attempt to solve the SAT problem.
-type pathEntry struct {
+type pathEntry[T comparable] struct {
 	// decision did this result from a decision, rather than BCP?
 	decision bool
 	// level that the entry was created at.
 	level int
 	// variable that was set.
-	variable *variable
+	variable *variable[T]
 	// clause (where set by BCP) that caused the inference.
-	clause *clause
+	clause *clause[T]
 }
 
-func (e *pathEntry) String() string {
+func (e *pathEntry[T]) String() string {
 	cause := "(decision)"
 
 	if !e.decision {
@@ -531,15 +531,15 @@ func (e *pathEntry) String() string {
 }
 
 // path remembers decisions and inferences made and what made them.
-type path struct {
-	entries []pathEntry
+type path[T comparable] struct {
+	entries []pathEntry[T]
 }
 
-func newPath() *path {
-	return &path{}
+func newPath[T comparable]() *path[T] {
+	return &path[T]{}
 }
 
-func (p *path) dump() {
+func (p *path[T]) dump() {
 	fmt.Println("path:")
 
 	for _, entry := range p.entries {
@@ -547,8 +547,8 @@ func (p *path) dump() {
 	}
 }
 
-func (p *path) push(decision bool, level int, variable *variable, clause *clause) {
-	p.entries = append(p.entries, pathEntry{
+func (p *path[T]) push(decision bool, level int, variable *variable[T], clause *clause[T]) {
+	p.entries = append(p.entries, pathEntry[T]{
 		decision: decision,
 		level:    level,
 		variable: variable,
@@ -558,8 +558,8 @@ func (p *path) push(decision bool, level int, variable *variable, clause *clause
 
 // Rollback accepts a level to roll back to and removes all entries defined
 // after that level, performing any cleanup necessary.
-func (p *path) rollback(level int) {
-	i := slices.IndexFunc(p.entries, func(entry pathEntry) bool {
+func (p *path[T]) rollback(level int) {
+	i := slices.IndexFunc(p.entries, func(entry pathEntry[T]) bool {
 		return entry.level > level
 	})
 
@@ -571,57 +571,57 @@ func (p *path) rollback(level int) {
 }
 
 // CDCLSolver implements CDCL (conflict driven clause learning).
-type CDCLSolver struct {
+type CDCLSolver[T comparable] struct {
 	// variables reference by clause literals.
-	variables *variableSet
+	variables *variableSet[T]
 	// clauses that make up the CNF (conjunctive noraml form).
-	clauses *clauseList
+	clauses *clauseList[T]
 	// path that acts as a journal of our decisions and how we arrived there.
-	path *path
+	path *path[T]
 	// level is the decision level.
 	level int
 }
 
-func NewCDCLSolver() *CDCLSolver {
-	return &CDCLSolver{
-		variables: newVariableSet(),
-		clauses:   newClauseList(),
-		path:      newPath(),
+func NewCDCLSolver[T comparable]() *CDCLSolver[T] {
+	return &CDCLSolver[T]{
+		variables: newVariableSet[T](),
+		clauses:   newClauseList[T](),
+		path:      newPath[T](),
 	}
 }
 
 // Literal gets a literal for use in a clause.
-func (s *CDCLSolver) Literal(name string) *Literal {
-	return newLiteral(s.variables.get(name), false)
+func (s *CDCLSolver[T]) Literal(t T) *Literal[T] {
+	return newLiteral(s.variables.get(t), false)
 }
 
 // NegatedLiteral gets a negated literal for use in a clause.
-func (s *CDCLSolver) NegatedLiteral(name string) *Literal {
-	return newLiteral(s.variables.get(name), true)
+func (s *CDCLSolver[T]) NegatedLiteral(t T) *Literal[T] {
+	return newLiteral(s.variables.get(t), true)
 }
 
 // Clause defines a new clause from a set of literals.
-func (s *CDCLSolver) Clause(literals ...*Literal) {
+func (s *CDCLSolver[T]) Clause(literals ...*Literal[T]) {
 	s.clauses.add(newClause(literals...))
 }
 
 // Unary adds a unary clause e.g. this must be true.
-func (s *CDCLSolver) Unary(name string) {
-	s.Clause(s.Literal(name))
+func (s *CDCLSolver[T]) Unary(t T) {
+	s.Clause(s.Literal(t))
 }
 
 // NegatedUnary adds a negated unary clause e.g. this must be false.
-func (s *CDCLSolver) NegatedUnary(name string) {
-	s.Clause(s.NegatedLiteral(name))
+func (s *CDCLSolver[T]) NegatedUnary(t T) {
+	s.Clause(s.NegatedLiteral(t))
 }
 
 // AtLeastOneOf is a helper that defines a clause:
 // x1 v x2 v x3 v ... xN.
-func (s *CDCLSolver) AtLeastOneOf(names ...string) {
-	l := make([]*Literal, len(names))
+func (s *CDCLSolver[T]) AtLeastOneOf(t ...T) {
+	l := make([]*Literal[T], len(t))
 
-	for i, name := range names {
-		l[i] = s.Literal(name)
+	for i := range t {
+		l[i] = s.Literal(t[i])
 	}
 
 	s.Clause(l...)
@@ -629,11 +629,11 @@ func (s *CDCLSolver) AtLeastOneOf(names ...string) {
 
 // AtMostOneOf is a helper that defines a set of clauses:
 // ^x1 v ^x2, ^x1 v ^x3, ..., ^xN-1 v ^xN.
-func (s *CDCLSolver) AtMostOneOf(names ...string) {
-	l := make([]*Literal, len(names))
+func (s *CDCLSolver[T]) AtMostOneOf(t ...T) {
+	l := make([]*Literal[T], len(t))
 
-	for i, name := range names {
-		l[i] = s.NegatedLiteral(name)
+	for i := range t {
+		l[i] = s.NegatedLiteral(t[i])
 	}
 
 	for a, b := range Permute(l) {
@@ -643,19 +643,19 @@ func (s *CDCLSolver) AtMostOneOf(names ...string) {
 
 // ImpliesAtLeastOneOf is a helper that defines a clause:
 // ^x1 v y1 v y2 v ... yN.
-func (s *CDCLSolver) ImpliesAtLeastOneOf(name string, names ...string) {
-	l := make([]*Literal, len(names)+1)
+func (s *CDCLSolver[T]) ImpliesAtLeastOneOf(t T, ti ...T) {
+	l := make([]*Literal[T], len(ti)+1)
 
-	l[0] = s.NegatedLiteral(name)
+	l[0] = s.NegatedLiteral(t)
 
-	for i, name := range names {
-		l[i+1] = s.Literal(name)
+	for i := range ti {
+		l[i+1] = s.Literal(ti[i])
 	}
 
 	s.Clause(l...)
 }
 
-func (s *CDCLSolver) Dump() {
+func (s *CDCLSolver[T]) Dump() {
 	s.variables.dump()
 	s.clauses.dump()
 	s.path.dump()
@@ -663,7 +663,7 @@ func (s *CDCLSolver) Dump() {
 
 // conflict returns true if a conflict has been detected and the clause
 // that caused it.
-func (s *CDCLSolver) conflict() (*clause, bool) {
+func (s *CDCLSolver[T]) conflict() (*clause[T], bool) {
 	// TODO: deterministic option?
 	for clause := range s.clauses.conflicts.All() {
 		return clause, true
@@ -673,7 +673,7 @@ func (s *CDCLSolver) conflict() (*clause, bool) {
 }
 
 // bcpSingle runs a single BCP pass, returning true if we did something.
-func (s *CDCLSolver) bcpSingle() bool {
+func (s *CDCLSolver[T]) bcpSingle() bool {
 	// TODO: deterministic option?
 	for clause := range s.clauses.unit.All() {
 		// Find the unset literal and make it true...
@@ -693,7 +693,7 @@ func (s *CDCLSolver) bcpSingle() bool {
 
 // bcp performs BCP while it can, or until a conflict is detected.
 // Returns true on a conflict and the clause that caused the conflict.
-func (s *CDCLSolver) bcp() (*clause, bool) {
+func (s *CDCLSolver[T]) bcp() (*clause[T], bool) {
 	for s.bcpSingle() {
 		if clause, ok := s.conflict(); ok {
 			return clause, true
@@ -707,7 +707,7 @@ func (s *CDCLSolver) bcp() (*clause, bool) {
 // the partial that were set at the current level.  When this hits 1 we've finished
 // resolution.  While we are at it, we also keep tabs on the asserting level we will
 // need to roll back to.
-func (s *CDCLSolver) partialVariablesAtCurrentLevel(partial partialclause, assertingLevel *int) int {
+func (s *CDCLSolver[T]) partialVariablesAtCurrentLevel(partial partialclause[T], assertingLevel *int) int {
 	var count int
 
 	var level int
@@ -730,7 +730,7 @@ func (s *CDCLSolver) partialVariablesAtCurrentLevel(partial partialclause, asser
 	return count
 }
 
-func (s *CDCLSolver) handleConflict(clause *clause) {
+func (s *CDCLSolver[T]) handleConflict(clause *clause[T]) {
 	partial := clause.partial()
 
 	var assertingLevel int
@@ -758,7 +758,7 @@ func (s *CDCLSolver) handleConflict(clause *clause) {
 	s.path.rollback(assertingLevel)
 
 	// Finally add our new clause.
-	l := make([]*Literal, 0, len(partial))
+	l := make([]*Literal[T], 0, len(partial))
 
 	// TODO: deterministic option?
 	for variable := range partial {
@@ -773,7 +773,7 @@ func (s *CDCLSolver) handleConflict(clause *clause) {
 // trial and error is required.  For example, you may maintain some domain
 // specific knowledge about variables and clauses and be able to make more
 // sensible choices than an arbitrary selector.
-func (s *CDCLSolver) Solve(decide func(*CDCLSolver) (string, bool)) bool {
+func (s *CDCLSolver[T]) Solve(decide func(*CDCLSolver[T]) (T, bool)) bool {
 	// Do an initial boolean constant propagation.
 	if _, conflict := s.bcp(); conflict {
 		return false
@@ -785,9 +785,9 @@ func (s *CDCLSolver) Solve(decide func(*CDCLSolver) (string, bool)) bool {
 		// to guess here as BCP cannot complete the task by itself.
 		s.level++
 
-		name, value := decide(s)
+		t, value := decide(s)
 
-		variable := s.variables.get(name)
+		variable := s.variables.get(t)
 		variable.define(value)
 
 		s.path.push(true, s.level, variable, nil)
@@ -807,20 +807,20 @@ func (s *CDCLSolver) Solve(decide func(*CDCLSolver) (string, bool)) bool {
 	return true
 }
 
-func (s *CDCLSolver) Variables() iter.Seq2[string, Boolean] {
-	return func(yield func(string, Boolean) bool) {
+func (s *CDCLSolver[T]) Variables() iter.Seq2[T, Boolean] {
+	return func(yield func(T, Boolean) bool) {
 		for _, v := range s.variables.list {
-			if !yield(v.extName, v.Boolean) {
+			if !yield(v.userinfo, v.Boolean) {
 				return
 			}
 		}
 	}
 }
 
-func DefaultChooser(s *CDCLSolver) (string, bool) {
-	for name, v := range s.Variables() {
+func DefaultChooser[T comparable](s *CDCLSolver[T]) (T, bool) {
+	for t, v := range s.Variables() {
 		if v.Undefined() {
-			return name, false
+			return t, false
 		}
 	}
 
