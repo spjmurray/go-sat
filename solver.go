@@ -641,6 +641,20 @@ func (s *CDCLSolver) AtMostOneOf(names ...string) {
 	}
 }
 
+// ImpliesAtLeastOneOf is a helper that defines a clause:
+// ^x1 v y1 v y2 v ... yN.
+func (s *CDCLSolver) ImpliesAtLeastOneOf(name string, names ...string) {
+	l := make([]*Literal, len(names)+1)
+
+	l[0] = s.NegatedLiteral(name)
+
+	for i, name := range names {
+		l[i+1] = s.Literal(name)
+	}
+
+	s.Clause(l...)
+}
+
 func (s *CDCLSolver) Dump() {
 	s.variables.dump()
 	s.clauses.dump()
