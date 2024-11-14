@@ -147,7 +147,7 @@ func sudokuPrint(s *sat.CDCLSolver) {
 	result := [9][9]int{}
 
 	for name, value := range s.Variables() {
-		if value {
+		if value.Value() {
 			var i, j, n int
 
 			_, _ = fmt.Sscanf(name, "%d:%d:%d", &i, &j, &n)
