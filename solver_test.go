@@ -36,22 +36,23 @@ var sudoku = [9][9]int{
 	{1, 6, 5, 0, 7, 0, 0, 0, 8},
 }
 
-// Generates a useful name for our variables so we can map them back
-// to aSudoku board.
-func varName(i, j, n int) string {
-	return fmt.Sprintf("%d:%d:%d", i, j, n)
+// variable maps to a location on the grid and a value.
+type variable struct {
+	i int
+	j int
+	n int
 }
 
 // sudokuRules adds Sudoku rules to the solver.
 //
-//nolint:gocognit,cyclop
-func sudokuRules(s *sat.CDCLSolver) {
+//nolint:cyclop
+func sudokuRules(s *sat.CDCLSolver[variable]) {
 	for i := range 9 {
 		for j := range 9 {
-			names := make([]string, 9)
+			names := make([]variable, 9)
 
 			for n := range 9 {
-				names[n] = varName(i, j, n)
+				names[n] = variable{i, j, n}
 			}
 
 			// Every cell must have one value.
@@ -61,10 +62,10 @@ func sudokuRules(s *sat.CDCLSolver) {
 
 		// In every row a value can only occur once.
 		for n := range 9 {
-			names := make([]string, 9)
+			names := make([]variable, 9)
 
 			for j := range 9 {
-				names[j] = varName(i, j, n)
+				names[j] = variable{i, j, n}
 			}
 
 			s.AtMostOneOf(names...)
@@ -74,10 +75,10 @@ func sudokuRules(s *sat.CDCLSolver) {
 	// In every column a value can only occur once.
 	for j := range 9 {
 		for n := range 9 {
-			names := make([]string, 9)
+			names := make([]variable, 9)
 
 			for i := range 9 {
-				names[i] = varName(i, j, n)
+				names[i] = variable{i, j, n}
 			}
 
 			s.AtMostOneOf(names...)
@@ -88,12 +89,10 @@ func sudokuRules(s *sat.CDCLSolver) {
 	for i := 0; i < 9; i += 3 {
 		for j := 0; j < 9; j += 3 {
 			for n := range 9 {
-				names := make([]string, 0, 9)
+				names := make([]variable, 9)
 
-				for x := range 3 {
-					for y := range 3 {
-						names = append(names, varName(i+x, j+y, n))
-					}
+				for x := range 9 {
+					names[x] = variable{i + x/3, j + x%3, n}
 				}
 
 				s.AtMostOneOf(names...)
@@ -102,26 +101,22 @@ func sudokuRules(s *sat.CDCLSolver) {
 	}
 }
 
-func sudokuInitialize(s *sat.CDCLSolver) {
+func sudokuInitialize(s *sat.CDCLSolver[variable]) {
 	for i := range 9 {
 		for j := range 9 {
 			if sudoku[i][j] > 0 {
-				s.Unary(varName(i, j, sudoku[i][j]-1))
+				s.Unary(variable{i, j, sudoku[i][j] - 1})
 			}
 		}
 	}
 }
 
-func sudokuPrint(s *sat.CDCLSolver) {
+func sudokuPrint(s *sat.CDCLSolver[variable]) {
 	result := [9][9]int{}
 
-	for name, value := range s.Variables() {
+	for variable, value := range s.Variables() {
 		if value.Value() {
-			var i, j, n int
-
-			_, _ = fmt.Sscanf(name, "%d:%d:%d", &i, &j, &n)
-
-			result[i][j] = n + 1
+			result[variable.i][variable.j] = variable.n + 1
 		}
 	}
 
@@ -151,7 +146,7 @@ func sudokuPrint(s *sat.CDCLSolver) {
 }
 
 func ExampleCDCLSolver() {
-	s := sat.NewCDCLSolver()
+	s := sat.NewCDCLSolver[variable]()
 
 	// Add implicit rules that apply to all Sudoku problems.
 	sudokuRules(s)
@@ -159,7 +154,7 @@ func ExampleCDCLSolver() {
 	// Add unit clauses from the initial state.
 	sudokuInitialize(s)
 
-	if !s.Solve(sat.DefaultChooser) {
+	if !s.Solve(sat.DefaultChooser[variable]) {
 		panic("unsolvable")
 	}
 
@@ -183,7 +178,7 @@ func ExampleCDCLSolver() {
 
 func BenchmarkSudoku(b *testing.B) {
 	for range b.N {
-		s := sat.NewCDCLSolver()
+		s := sat.NewCDCLSolver[variable]()
 
 		sudokuRules(s)
 		sudokuInitialize(s)
