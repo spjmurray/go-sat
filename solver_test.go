@@ -146,7 +146,12 @@ func sudokuPrint(s *sat.CDCLSolver[variable]) {
 }
 
 func ExampleCDCLSolver() {
-	s := sat.NewCDCLSolver[variable]()
+	o := &sat.CDCLOptions{
+		// We need around 12,000 clauses for this problem.
+		ClauseCapacity: 15000,
+	}
+
+	s := sat.NewCDCLSolver[variable](o)
 
 	// Add implicit rules that apply to all Sudoku problems.
 	sudokuRules(s)
@@ -178,7 +183,12 @@ func ExampleCDCLSolver() {
 
 func BenchmarkSudoku(b *testing.B) {
 	for range b.N {
-		s := sat.NewCDCLSolver[variable]()
+		o := &sat.CDCLOptions{
+			// We need around 12,000 clauses for this problem.
+			ClauseCapacity: 15000,
+		}
+
+		s := sat.NewCDCLSolver[variable](o)
 
 		sudokuRules(s)
 		sudokuInitialize(s)
