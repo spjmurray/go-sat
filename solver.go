@@ -129,15 +129,15 @@ func (b *Boolean) undefine() {
 type variable[T comparable] struct {
 	// Boolean allows the variable to notify subscribers of updates.
 	Boolean
-	// name is the short variable name e.g. v1, v6.
-	name string
+	// id is the unique id of the variable.
+	id int
 	// userinfo is a user defined type used to compare variables.
 	userinfo T
 }
 
-func newVariable[T comparable](name string, userinfo T) *variable[T] {
+func newVariable[T comparable](id int, userinfo T) *variable[T] {
 	return &variable[T]{
-		name:     name,
+		id:       id,
 		userinfo: userinfo,
 	}
 }
@@ -156,7 +156,7 @@ func (v *variable[T]) String() string {
 		}
 	}
 
-	return head + v.name + tail
+	return fmt.Sprint(head, "v", v.id, tail)
 }
 
 // variableSet controls variable allocation and mapping.
@@ -182,7 +182,7 @@ func (s *variableSet[T]) get(t T) *variable[T] {
 		return v
 	}
 
-	v := newVariable(fmt.Sprint("v", s.counter), t)
+	v := newVariable(s.counter, t)
 
 	s.list = append(s.list, v)
 	s.variables[t] = v
@@ -276,7 +276,7 @@ func (l *Literal[T]) String() string {
 		negation = "¬"
 	}
 
-	return head + negation + l.variable.name + tail
+	return fmt.Sprint(head, negation, "v", l.variable.id, tail)
 }
 
 type literalCacheKey[T comparable] struct {
@@ -322,16 +322,15 @@ type clause[T comparable] struct {
 	initialized bool
 }
 
-func newClause[T comparable](literals ...*Literal[T]) *clause[T] {
+func (c *clause[T]) init(id int, literals ...*Literal[T]) {
 	// The maths for the bitfield is quite simple.
 	// ((1 + 63) >> 6) = (64 >> 6) = 1
 	// ((64 + 63) >> 6) = (127 >> 6) = 1
 	words := (len(literals) + 63) >> 6
 
-	c := &clause[T]{
-		literals: literals,
-		bitfield: make([]int64, words),
-	}
+	c.id = id
+	c.literals = literals
+	c.bitfield = make([]int64, words)
 
 	for i := range literals {
 		update := func(s Boolean) {
@@ -342,8 +341,6 @@ func newClause[T comparable](literals ...*Literal[T]) *clause[T] {
 	}
 
 	c.initialized = true
-
-	return c
 }
 
 func (c clause[T]) String() string {
@@ -435,10 +432,8 @@ func (c *clause[T]) partial() partialclause[T] {
 
 // clauseList wraps up handling of clauses.
 type clauseList[T comparable] struct {
-	// counter is used to name clauses for determinism.
-	counter int
 	// items are all the clauses in list.
-	items []*clause[T]
+	items []clause[T]
 	// unit are clauses that have one missing literal and have a value
 	// of false, meaning the remaining one needs to be true.
 	unit Set[*clause[T]]
@@ -446,26 +441,33 @@ type clauseList[T comparable] struct {
 	conflicts Set[*clause[T]]
 }
 
-func newClauseList[T comparable]() *clauseList[T] {
+func newClauseList[T comparable](capacity int) *clauseList[T] {
 	return &clauseList[T]{
+		items:     make([]clause[T], 0, capacity),
 		unit:      Set[*clause[T]]{},
 		conflicts: Set[*clause[T]]{},
 	}
 }
 
-// Add appends a new clause to the list.
-func (l *clauseList[T]) add(c *clause[T]) {
-	c.id = l.counter
+// Create makes a new clause.
+func (l *clauseList[T]) create(literals []*Literal[T]) *clause[T] {
+	id := len(l.items)
 
-	l.counter++
+	// Expand the array.
+	l.items = append(l.items, clause[T]{})
 
-	l.items = append(l.items, c)
+	c := &l.items[id]
+
+	// Inplace create the clause, this avoids heavy memory allocation.
+	c.init(id, literals...)
 
 	update := func(s Boolean) {
 		l.update(c, s)
 	}
 
 	c.subscribe(update)
+
+	return c
 }
 
 func (l *clauseList[T]) update(c *clause[T], s Boolean) {
@@ -518,22 +520,6 @@ func (p partialclause[T]) resolve(o partialclause[T]) partialclause[T] {
 	return r
 }
 
-func (p partialclause[T]) String() string {
-	s := make([]string, 0, len(p))
-
-	for name, negated := range p {
-		if !negated {
-			s = append(s, name.name)
-
-			continue
-		}
-
-		s = append(s, "¬"+name.name)
-	}
-
-	return strings.Join(s, " v ")
-}
-
 // pathEntry remembers decisions made as we attempt to solve the SAT problem.
 type pathEntry[T comparable] struct {
 	// decision did this result from a decision, rather than BCP?
@@ -553,7 +539,7 @@ func (e *pathEntry[T]) String() string {
 		cause = "(clause " + e.clause.String() + ")"
 	}
 
-	return fmt.Sprint(e.variable.name, "@", e.level, " ", cause)
+	return fmt.Sprint("v", e.variable.id, "@", e.level, " ", cause)
 }
 
 // path remembers decisions and inferences made and what made them.
@@ -610,11 +596,28 @@ type CDCLSolver[T comparable] struct {
 	level int
 }
 
-func NewCDCLSolver[T comparable]() *CDCLSolver[T] {
+type CDCLOptions struct {
+	// ClauseCapacity allows upfront allocation of clauses.  While this is
+	// not an upper limit it can have a huge impact on initialization performance
+	// when defining your clauses.  Ignored if <= 0.
+	ClauseCapacity int
+}
+
+func NewCDCLSolver[T comparable](o *CDCLOptions) *CDCLSolver[T] {
+	// This is fine for small problems, you may need to make this quite
+	// large for bigger ones.
+	clauseCapacity := 1000
+
+	if o != nil {
+		if o.ClauseCapacity > 0 {
+			clauseCapacity = o.ClauseCapacity
+		}
+	}
+
 	return &CDCLSolver[T]{
 		variables: newVariableSet[T](),
 		literals:  newLiteralCache[T](),
-		clauses:   newClauseList[T](),
+		clauses:   newClauseList[T](clauseCapacity),
 		path:      newPath[T](),
 	}
 }
@@ -643,7 +646,7 @@ func (s *CDCLSolver[T]) NegatedLiteral(t T) *Literal[T] {
 
 // Clause defines a new clause from a set of literals.
 func (s *CDCLSolver[T]) Clause(literals ...*Literal[T]) {
-	s.clauses.add(newClause(literals...))
+	s.clauses.create(literals)
 }
 
 // Unary adds a unary clause e.g. this must be true.
@@ -806,7 +809,7 @@ func (s *CDCLSolver[T]) handleConflict(clause *clause[T]) {
 		l = append(l, newLiteral(variable, partial[variable]))
 	}
 
-	s.clauses.add(newClause(l...))
+	s.clauses.create(l)
 }
 
 // Solve does the top level solving of the SAT problem.  It accepts a custom
