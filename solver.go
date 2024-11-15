@@ -279,12 +279,39 @@ func (l *Literal[T]) String() string {
 	return head + negation + l.variable.name + tail
 }
 
+type literalCacheKey[T comparable] struct {
+	variable T
+	negated  bool
+}
+
+// literalCache maps a variable identifier and negation state to a literal to
+// prevent extra resources to constrain memory use and prevent excessive fanout
+// during BCP.
+type literalCache[T comparable] struct {
+	cache map[literalCacheKey[T]]*Literal[T]
+}
+
+func newLiteralCache[T comparable]() *literalCache[T] {
+	return &literalCache[T]{
+		cache: map[literalCacheKey[T]]*Literal[T]{},
+	}
+}
+
+func (c *literalCache[T]) get(variable T, negated bool) (*Literal[T], bool) {
+	v, ok := c.cache[literalCacheKey[T]{variable: variable, negated: negated}]
+	return v, ok
+}
+
+func (c *literalCache[T]) set(variable T, negated bool, literal *Literal[T]) {
+	c.cache[literalCacheKey[T]{variable: variable, negated: negated}] = literal
+}
+
 // clause is a logical OR of literals.
 type clause[T comparable] struct {
 	// Boolean allows the variable to notify subscribers of updates.
 	Boolean
-	// name is the name of the clause.
-	name string
+	// id is the unique id of the clause.
+	id int
 	// literals is an ordered list of all iterals that make up the clause.
 	literals []*Literal[T]
 	// numDefined is a count of the number of defined literals.
@@ -339,7 +366,7 @@ func (c clause[T]) String() string {
 		tail = "\x1b[0m"
 	}
 
-	return head + c.name + tail + ": " + strings.Join(s, " ∨ ")
+	return fmt.Sprint(head, "c", c.id, tail, ":", strings.Join(s, " ∨ "))
 }
 
 // Complete tells us whether all literals are set.
@@ -428,10 +455,9 @@ func newClauseList[T comparable]() *clauseList[T] {
 
 // Add appends a new clause to the list.
 func (l *clauseList[T]) add(c *clause[T]) {
-	name := fmt.Sprint("c", l.counter)
-	l.counter++
+	c.id = l.counter
 
-	c.name = name
+	l.counter++
 
 	l.items = append(l.items, c)
 
@@ -574,6 +600,8 @@ func (p *path[T]) rollback(level int) {
 type CDCLSolver[T comparable] struct {
 	// variables reference by clause literals.
 	variables *variableSet[T]
+	// literals allows sharing of literals.
+	literals *literalCache[T]
 	// clauses that make up the CNF (conjunctive noraml form).
 	clauses *clauseList[T]
 	// path that acts as a journal of our decisions and how we arrived there.
@@ -585,19 +613,32 @@ type CDCLSolver[T comparable] struct {
 func NewCDCLSolver[T comparable]() *CDCLSolver[T] {
 	return &CDCLSolver[T]{
 		variables: newVariableSet[T](),
+		literals:  newLiteralCache[T](),
 		clauses:   newClauseList[T](),
 		path:      newPath[T](),
 	}
 }
 
+func (s *CDCLSolver[T]) literal(t T, negated bool) *Literal[T] {
+	if l, ok := s.literals.get(t, negated); ok {
+		return l
+	}
+
+	l := newLiteral(s.variables.get(t), negated)
+
+	s.literals.set(t, negated, l)
+
+	return l
+}
+
 // Literal gets a literal for use in a clause.
 func (s *CDCLSolver[T]) Literal(t T) *Literal[T] {
-	return newLiteral(s.variables.get(t), false)
+	return s.literal(t, false)
 }
 
 // NegatedLiteral gets a negated literal for use in a clause.
 func (s *CDCLSolver[T]) NegatedLiteral(t T) *Literal[T] {
-	return newLiteral(s.variables.get(t), true)
+	return s.literal(t, true)
 }
 
 // Clause defines a new clause from a set of literals.
