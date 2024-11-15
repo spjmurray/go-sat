@@ -15,6 +15,6 @@ goos: linux
 goarch: amd64
 pkg: github.com/spjmurray/go-sat
 cpu: 12th Gen Intel(R) Core(TM) i7-1270P
-BenchmarkSudoku-16    	     138	   8952452 ns/op
+BenchmarkSudoku-16    	     205	   6533700 ns/op
 PASS
 ```
