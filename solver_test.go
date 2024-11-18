@@ -46,7 +46,7 @@ type variable struct {
 // sudokuRules adds Sudoku rules to the solver.
 //
 //nolint:cyclop
-func sudokuRules(s *sat.CDCLSolver[variable]) {
+func sudokuRules(m *sat.Model[variable]) {
 	for i := range 9 {
 		for j := range 9 {
 			names := make([]variable, 9)
@@ -56,8 +56,8 @@ func sudokuRules(s *sat.CDCLSolver[variable]) {
 			}
 
 			// Every cell must have one value.
-			s.AtLeastOneOf(names...)
-			s.AtMostOneOf(names...)
+			m.AtLeastOneOf(names...)
+			m.AtMostOneOf(names...)
 		}
 
 		// In every row a value can only occur once.
@@ -68,7 +68,7 @@ func sudokuRules(s *sat.CDCLSolver[variable]) {
 				names[j] = variable{i, j, n}
 			}
 
-			s.AtMostOneOf(names...)
+			m.AtMostOneOf(names...)
 		}
 	}
 
@@ -81,7 +81,7 @@ func sudokuRules(s *sat.CDCLSolver[variable]) {
 				names[i] = variable{i, j, n}
 			}
 
-			s.AtMostOneOf(names...)
+			m.AtMostOneOf(names...)
 		}
 	}
 
@@ -95,26 +95,28 @@ func sudokuRules(s *sat.CDCLSolver[variable]) {
 					names[x] = variable{i + x/3, j + x%3, n}
 				}
 
-				s.AtMostOneOf(names...)
+				m.AtMostOneOf(names...)
 			}
 		}
 	}
 }
 
-func sudokuInitialize(s *sat.CDCLSolver[variable]) {
+func sudokuInitialize(m *sat.Model[variable]) {
 	for i := range 9 {
 		for j := range 9 {
 			if sudoku[i][j] > 0 {
-				s.Unary(variable{i, j, sudoku[i][j] - 1})
+				if err := m.Unary(variable{i, j, sudoku[i][j] - 1}); err != nil {
+					panic("unary value caused a conflict!")
+				}
 			}
 		}
 	}
 }
 
-func sudokuPrint(s *sat.CDCLSolver[variable]) {
+func sudokuPrint(m *sat.Model[variable]) {
 	result := [9][9]int{}
 
-	for variable, value := range s.Variables() {
+	for variable, value := range m.Variables() {
 		if value.Value() {
 			result[variable.i][variable.j] = variable.n + 1
 		}
@@ -146,24 +148,20 @@ func sudokuPrint(s *sat.CDCLSolver[variable]) {
 }
 
 func ExampleCDCLSolver() {
-	o := &sat.CDCLOptions{
-		// We need around 12,000 clauses for this problem.
-		ClauseCapacity: 15000,
-	}
-
-	s := sat.NewCDCLSolver[variable](o)
+	m := sat.NewModel[variable]()
 
 	// Add implicit rules that apply to all Sudoku problems.
-	sudokuRules(s)
+	sudokuRules(m)
 
-	// Add unit clauses from the initial state.
-	sudokuInitialize(s)
+	sudokuInitialize(m)
 
-	if err := s.Solve(sat.DefaultChooser[variable]); err != nil {
+	s := sat.NewCDCLSolver()
+
+	if err := s.Solve(m, sat.DefaultChooser); err != nil {
 		fmt.Println(err)
 	}
 
-	sudokuPrint(s)
+	sudokuPrint(m)
 
 	// Output:
 	// ┌───┬───┬───┐
@@ -182,19 +180,23 @@ func ExampleCDCLSolver() {
 }
 
 func BenchmarkSudoku(b *testing.B) {
+	b.StopTimer()
+
+	m := sat.NewModel[variable]()
+
+	sudokuRules(m)
+
+	b.StartTimer()
+
 	for range b.N {
-		o := &sat.CDCLOptions{
-			// We need around 12,000 clauses for this problem.
-			ClauseCapacity: 15000,
-		}
+		sudokuInitialize(m)
 
-		s := sat.NewCDCLSolver[variable](o)
+		s := sat.NewCDCLSolver()
 
-		sudokuRules(s)
-		sudokuInitialize(s)
-
-		if err := s.Solve(sat.DefaultChooser); err != nil {
+		if err := s.Solve(m, sat.DefaultChooser); err != nil {
 			b.Fatal(err)
 		}
+
+		m.Reset()
 	}
 }
