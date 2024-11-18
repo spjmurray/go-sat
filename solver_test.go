@@ -159,8 +159,8 @@ func ExampleCDCLSolver() {
 	// Add unit clauses from the initial state.
 	sudokuInitialize(s)
 
-	if !s.Solve(sat.DefaultChooser[variable]) {
-		panic("unsolvable")
+	if err := s.Solve(sat.DefaultChooser[variable]); err != nil {
+		fmt.Println(err)
 	}
 
 	sudokuPrint(s)
@@ -193,8 +193,8 @@ func BenchmarkSudoku(b *testing.B) {
 		sudokuRules(s)
 		sudokuInitialize(s)
 
-		if !s.Solve(sat.DefaultChooser) {
-			b.Fatal()
+		if err := s.Solve(sat.DefaultChooser); err != nil {
+			b.Fatal(err)
 		}
 	}
 }
