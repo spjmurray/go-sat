@@ -17,11 +17,16 @@ limitations under the License.
 package sat
 
 import (
+	"errors"
 	"fmt"
 	"iter"
 	"maps"
 	"slices"
 	"strings"
+)
+
+var (
+	ErrUnexpected = errors.New("unexpectd error")
 )
 
 // Set allows O(log N) insertion and deletion.
@@ -88,7 +93,7 @@ type Boolean struct {
 	subscribers []subscribeFn
 }
 
-type subscribeFn func(Boolean)
+type subscribeFn func(Boolean) error
 
 func (b Boolean) Undefined() bool {
 	return b.value == nil
@@ -105,24 +110,28 @@ func (b Boolean) Value() bool {
 // subscribe registers the callback function and calls it to communicate the initial value.
 func (b *Boolean) subscribe(callback subscribeFn) {
 	b.subscribers = append(b.subscribers, callback)
-
-	callback(*b)
 }
 
-func (b *Boolean) notify() {
+func (b *Boolean) notify() error {
 	for _, f := range b.subscribers {
-		f(*b)
+		if err := f(*b); err != nil {
+			return err
+		}
 	}
+
+	return nil
 }
 
-func (b *Boolean) define(value bool) {
+func (b *Boolean) define(value bool) error {
 	b.value = &value
-	b.notify()
+
+	return b.notify()
 }
 
-func (b *Boolean) undefine() {
+func (b *Boolean) undefine() error {
 	b.value = nil
-	b.notify()
+
+	return b.notify()
 }
 
 // variable represents a boolean variable.
@@ -240,20 +249,12 @@ func newLiteral[T comparable](variable *variable[T], negated bool) *Literal[T] {
 
 // update accespts updates from the underlying variable, does any necessary
 // mutations due to negation, then notifies any subscribed clauses.
-func (l *Literal[T]) update(v Boolean) {
+func (l *Literal[T]) update(v Boolean) error {
 	if v.Defined() {
-		l.Boolean.define(v.Value() != l.negated)
-	} else {
-		l.Boolean.undefine()
+		return l.define(v.Value() != l.negated)
 	}
-}
 
-// define sets the literal to a specific value, and writes through to the
-// underlying variable paying attention to any negation.  The local value
-// wiill be updated by the subscription callback.
-func (l *Literal[T]) define(value bool) {
-	// This is an XOR in essence.
-	l.variable.define(value != l.negated)
+	return l.undefine()
 }
 
 func (l *Literal[T]) String() string {
@@ -316,31 +317,30 @@ type clause[T comparable] struct {
 	literals []*Literal[T]
 	// numDefined is a count of the number of defined literals.
 	numDefined int
-	// bitfield records the boolean values of all the literals (upto 64 for now...)
-	bitfield []int64
-	// initialized is used for consistency of the defined count.
-	initialized bool
+	// literalDefined records whether a value as defined.
+	literalDefined []int64
+	// literalValues records the boolean values of all the literals (upto 64 for now...)
+	literalValues []int64
 }
 
 func (c *clause[T]) init(id int, literals ...*Literal[T]) {
-	// The maths for the bitfield is quite simple.
+	// The maths for the values is quite simple.
 	// ((1 + 63) >> 6) = (64 >> 6) = 1
 	// ((64 + 63) >> 6) = (127 >> 6) = 1
 	words := (len(literals) + 63) >> 6
 
 	c.id = id
 	c.literals = literals
-	c.bitfield = make([]int64, words)
+	c.literalDefined = make([]int64, words)
+	c.literalValues = make([]int64, words)
 
 	for i := range literals {
-		update := func(s Boolean) {
-			c.update(i, s)
+		update := func(s Boolean) error {
+			return c.update(i, s)
 		}
 
 		literals[i].subscribe(update)
 	}
-
-	c.initialized = true
 }
 
 func (c clause[T]) String() string {
@@ -363,7 +363,7 @@ func (c clause[T]) String() string {
 		tail = "\x1b[0m"
 	}
 
-	return fmt.Sprint(head, "c", c.id, tail, ":", strings.Join(s, " ∨ "))
+	return fmt.Sprint(head, "c", c.id, tail, ": ", c.numDefined, " ", len(c.literals), " ", strings.Join(s, " ∨ "))
 }
 
 // Complete tells us whether all literals are set.
@@ -378,7 +378,7 @@ func (c *clause[T]) Unit() bool {
 
 // Value tells us whether there is a conflict (false), or not.
 func (c *clause[T]) Value() bool {
-	for _, i := range c.bitfield {
+	for _, i := range c.literalValues {
 		if i != 0 {
 			return true
 		}
@@ -387,36 +387,56 @@ func (c *clause[T]) Value() bool {
 	return false
 }
 
-func (c *clause[T]) update(i int, s Boolean) {
+type ConflictError[T comparable] struct {
+	clause *clause[T]
+}
+
+func (e *ConflictError[T]) Error() string {
+	return fmt.Sprint("conflict error: ", e.clause)
+}
+
+//nolint:cyclop
+func (c *clause[T]) update(i int, s Boolean) error {
 	word := i >> 6
 	bit := i & 0x3f
 
-	// Zero out the bit unconditionally, this handles when the value
-	// is undefined and when defined but false.
-	c.bitfield[word] &= ^(1 << bit)
+	// Was this already defined and do we need to do anything?
+	literalDefined := c.literalDefined[word]&(1<<bit) != 0
 
-	// If something is defined either during initialization or as pert
-	// of normal operation, update the counts and values.
-	if s.Defined() {
-		c.numDefined++
-
-		if s.Value() {
-			c.bitfield[word] |= 1 << bit
-		}
+	// Both in the same state of definedness.
+	if !s.Defined() && !literalDefined {
+		return nil
 	}
 
-	// Only update the defined count after initialization, otherwise
-	// you'll end up with negative counts!
-	if s.Undefined() && c.initialized {
+	beingDefined := !literalDefined && s.Defined()
+	beingUndefined := literalDefined && !s.Defined()
+
+	if beingDefined {
+		c.numDefined++
+		c.literalDefined[word] |= 1 << bit
+
+		if s.Value() {
+			c.literalValues[word] |= 1 << bit
+		}
+	} else if beingUndefined {
 		c.numDefined--
+		c.literalDefined[word] &= ^(1 << bit)
+		c.literalValues[word] &= ^(1 << bit)
+	}
+
+	// Detect a conflict early and don't do any more work than necessary.
+	if c.Complete() && !c.Value() {
+		return &ConflictError[T]{
+			clause: c,
+		}
 	}
 
 	// Propagate the new value up to any subscribers.
 	if c.Complete() || c.Value() {
-		c.define(c.Value())
-	} else {
-		c.undefine()
+		return c.define(c.Value())
 	}
+
+	return c.undefine()
 }
 
 // partial returns a partial clause for conflict resolution.
@@ -437,15 +457,12 @@ type clauseList[T comparable] struct {
 	// unit are clauses that have one missing literal and have a value
 	// of false, meaning the remaining one needs to be true.
 	unit Set[*clause[T]]
-	// conflicts are updated by subscriptions on the clause.
-	conflicts Set[*clause[T]]
 }
 
 func newClauseList[T comparable](capacity int) *clauseList[T] {
 	return &clauseList[T]{
-		items:     make([]clause[T], 0, capacity),
-		unit:      Set[*clause[T]]{},
-		conflicts: Set[*clause[T]]{},
+		items: make([]clause[T], 0, capacity),
+		unit:  Set[*clause[T]]{},
 	}
 }
 
@@ -461,29 +478,29 @@ func (l *clauseList[T]) create(literals []*Literal[T]) *clause[T] {
 	// Inplace create the clause, this avoids heavy memory allocation.
 	c.init(id, literals...)
 
-	update := func(s Boolean) {
-		l.update(c, s)
+	update := func(s Boolean) error {
+		return l.update(c, s)
 	}
 
 	c.subscribe(update)
 
+	// If it's a unit clause add it now.
+	if len(literals) == 1 {
+		l.unit.Add(c)
+	}
+
 	return c
 }
 
-func (l *clauseList[T]) update(c *clause[T], s Boolean) {
-	// Do conflict detection.
-	if s.Defined() && !s.Value() {
-		l.conflicts.Add(c)
-	} else {
-		l.conflicts.Delete(c)
-	}
-
+func (l *clauseList[T]) update(c *clause[T], s Boolean) error {
 	// Do unit detection.
 	if c.Unit() {
 		l.unit.Add(c)
 	} else {
 		l.unit.Delete(c)
 	}
+
+	return nil
 }
 
 func (l *clauseList[T]) dump() {
@@ -570,16 +587,24 @@ func (p *path[T]) push(decision bool, level int, variable *variable[T], clause *
 
 // Rollback accepts a level to roll back to and removes all entries defined
 // after that level, performing any cleanup necessary.
-func (p *path[T]) rollback(level int) {
+func (p *path[T]) rollback(level int) error {
 	i := slices.IndexFunc(p.entries, func(entry pathEntry[T]) bool {
 		return entry.level > level
 	})
 
+	if i == -1 {
+		return fmt.Errorf("%w: no entries found in path level %d", ErrUnexpected, level)
+	}
+
 	for _, entry := range p.entries[i:] {
-		entry.variable.undefine()
+		if err := entry.variable.undefine(); err != nil {
+			return err
+		}
 	}
 
 	p.entries = p.entries[:i]
+
+	return nil
 }
 
 // CDCLSolver implements CDCL (conflict driven clause learning).
@@ -705,46 +730,42 @@ func (s *CDCLSolver[T]) Dump() {
 	s.path.dump()
 }
 
-// conflict returns true if a conflict has been detected and the clause
-// that caused it.
-func (s *CDCLSolver[T]) conflict() (*clause[T], bool) {
-	// TODO: deterministic option?
-	for clause := range s.clauses.conflicts.All() {
-		return clause, true
-	}
-
-	return nil, false
-}
-
 // bcpSingle runs a single BCP pass, returning true if we did something.
-func (s *CDCLSolver[T]) bcpSingle() bool {
+func (s *CDCLSolver[T]) bcpSingle() (bool, error) {
 	// TODO: deterministic option?
 	for clause := range s.clauses.unit.All() {
 		// Find the unset literal and make it true...
 		for _, literal := range clause.literals {
 			if literal.Undefined() {
-				literal.define(true)
-
 				s.path.push(false, s.level, literal.variable, clause)
 
-				return true
+				if err := literal.variable.define(!literal.negated); err != nil {
+					return false, err
+				}
+
+				return true, nil
 			}
 		}
 	}
 
-	return false
+	return false, nil
 }
 
 // bcp performs BCP while it can, or until a conflict is detected.
 // Returns true on a conflict and the clause that caused the conflict.
-func (s *CDCLSolver[T]) bcp() (*clause[T], bool) {
-	for s.bcpSingle() {
-		if clause, ok := s.conflict(); ok {
-			return clause, true
+func (s *CDCLSolver[T]) bcp() error {
+	for {
+		ok, err := s.bcpSingle()
+		if err != nil {
+			return err
+		}
+
+		if !ok {
+			break
 		}
 	}
 
-	return nil, false
+	return nil
 }
 
 // partialVariablesAtCurrentLevel returns the number of variables that are contained in
@@ -774,7 +795,7 @@ func (s *CDCLSolver[T]) partialVariablesAtCurrentLevel(partial partialclause[T],
 	return count
 }
 
-func (s *CDCLSolver[T]) handleConflict(clause *clause[T]) {
+func (s *CDCLSolver[T]) handleConflict(clause *clause[T]) error {
 	partial := clause.partial()
 
 	var assertingLevel int
@@ -799,7 +820,11 @@ func (s *CDCLSolver[T]) handleConflict(clause *clause[T]) {
 	// into a sane value, otherwise the new clause will probably see undefines
 	// it shouldn't.
 	s.level = assertingLevel
-	s.path.rollback(assertingLevel)
+
+	if err := s.path.rollback(assertingLevel); err != nil {
+		s.path.dump()
+		return err
+	}
 
 	// Finally add our new clause.
 	l := make([]*Literal[T], 0, len(partial))
@@ -810,6 +835,14 @@ func (s *CDCLSolver[T]) handleConflict(clause *clause[T]) {
 	}
 
 	s.clauses.create(l)
+
+	for variable := range partial {
+		if err := variable.notify(); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // Solve does the top level solving of the SAT problem.  It accepts a custom
@@ -817,10 +850,10 @@ func (s *CDCLSolver[T]) handleConflict(clause *clause[T]) {
 // trial and error is required.  For example, you may maintain some domain
 // specific knowledge about variables and clauses and be able to make more
 // sensible choices than an arbitrary selector.
-func (s *CDCLSolver[T]) Solve(decide func(*CDCLSolver[T]) (T, bool)) bool {
+func (s *CDCLSolver[T]) Solve(decide func(*CDCLSolver[T]) (T, bool)) error {
 	// Do an initial boolean constant propagation.
-	if _, conflict := s.bcp(); conflict {
-		return false
+	if err := s.bcp(); err != nil {
+		return fmt.Errorf("conflict at decision level 0: %w", err)
 	}
 
 	// Until we've fully defined all variables.
@@ -832,23 +865,34 @@ func (s *CDCLSolver[T]) Solve(decide func(*CDCLSolver[T]) (T, bool)) bool {
 		t, value := decide(s)
 
 		variable := s.variables.get(t)
-		variable.define(value)
+
+		if err := variable.define(value); err != nil {
+			return err
+		}
 
 		s.path.push(true, s.level, variable, nil)
 
 		for {
 			// If BCP has done all it can after the last guess,
 			// see if we're complete, otherwise make another guess.
-			clause, conflict := s.bcp()
-			if !conflict {
+			err := s.bcp()
+			if err == nil {
 				break
 			}
 
-			s.handleConflict(clause)
+			var cerr *ConflictError[T]
+
+			if !errors.As(err, &cerr) {
+				return fmt.Errorf("unexpected error type: %w", err)
+			}
+
+			if err := s.handleConflict(cerr.clause); err != nil {
+				return fmt.Errorf("unexpected conflict error: %w", err)
+			}
 		}
 	}
 
-	return true
+	return nil
 }
 
 func (s *CDCLSolver[T]) Variables() iter.Seq2[T, Boolean] {
@@ -864,7 +908,7 @@ func (s *CDCLSolver[T]) Variables() iter.Seq2[T, Boolean] {
 func DefaultChooser[T comparable](s *CDCLSolver[T]) (T, bool) {
 	for t, v := range s.Variables() {
 		if v.Undefined() {
-			return t, false
+			return t, true
 		}
 	}
 
