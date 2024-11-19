@@ -105,9 +105,7 @@ func sudokuInitialize(m *sat.Model[variable]) {
 	for i := range 9 {
 		for j := range 9 {
 			if sudoku[i][j] > 0 {
-				if err := m.Unary(variable{i, j, sudoku[i][j] - 1}); err != nil {
-					panic("unary value caused a conflict!")
-				}
+				m.Unary(variable{i, j, sudoku[i][j] - 1})
 			}
 		}
 	}

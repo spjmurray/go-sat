@@ -184,7 +184,6 @@ func (s *variableSet[T]) String() string {
 	return strings.Join(t, ", ")
 }
 
-//nolint:unused
 func (s *variableSet[T]) dump() {
 	fmt.Println("Variables:")
 	fmt.Println(s)
@@ -507,7 +506,6 @@ func (l *clauseList) destroy() {
 	}
 }
 
-//nolint:unused
 func (l *clauseList) dump() {
 	fmt.Println("clauses:")
 
@@ -591,13 +589,17 @@ func (m *Model[T]) Clause(literals ...*Literal) {
 }
 
 // Unary adds a unary clause e.g. this must be true.
-func (m *Model[T]) Unary(t T) error {
-	return m.variables.get(t).define(true)
+// NOTE: The assumption here is this is an initial condition for the problem
+// being solved, and should not be preserved across resets.
+func (m *Model[T]) Unary(t T) {
+	m.learnedClauses.create([]*Literal{m.Literal(t)})
 }
 
 // NegatedUnary adds a negated unary clause e.g. this must be false.
-func (m *Model[T]) NegatedUnary(t T) error {
-	return m.variables.get(t).define(false)
+// NOTE: The assumption here is this is an initial condition for the problem
+// being solved, and should not be preserved across resets.
+func (m *Model[T]) NegatedUnary(t T) {
+	m.learnedClauses.create([]*Literal{m.NegatedLiteral(t)})
 }
 
 // AtLeastOneOf is a helper that defines a clause:
@@ -685,8 +687,7 @@ func (m *Model[T]) Reset() {
 	m.learnedClauses = newClauseList()
 }
 
-//nolint:unused
-func (m *Model[T]) dump() {
+func (m *Model[T]) Dump() {
 	m.variables.dump()
 	m.clauses.dump()
 }
