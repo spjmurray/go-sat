@@ -14,12 +14,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package sat
+package cdcl
 
 import (
 	"fmt"
 	"iter"
 	"strings"
+
+	"github.com/spjmurray/go-sat/pkg/util"
+	"github.com/spjmurray/go-util/pkg/set"
 )
 
 // Boolean wraps up a boolean variable which may be undefined.
@@ -32,6 +35,7 @@ type Boolean struct {
 	subscribers map[int]subscribeFn
 }
 
+// NewBoolean creates a new boolean value.
 func NewBoolean() Boolean {
 	return Boolean{
 		subscribers: map[int]subscribeFn{},
@@ -40,14 +44,17 @@ func NewBoolean() Boolean {
 
 type subscribeFn func(Boolean) error
 
+// Undefined returns whether the variable is unset.
 func (b Boolean) Undefined() bool {
 	return b.value == nil
 }
 
+// Defined returns whether the variable is set.
 func (b Boolean) Defined() bool {
 	return b.value != nil
 }
 
+// Value returns the boolean value.  Defaults to false if unset.
 func (b Boolean) Value() bool {
 	return b.Defined() && *b.value
 }
@@ -107,6 +114,7 @@ func newVariable(id int) *variable {
 	}
 }
 
+// String formats a variable.
 func (v *variable) String() string {
 	head := ""
 	tail := ""
@@ -221,6 +229,7 @@ func (l *Literal) update(v Boolean) error {
 	return l.undefine()
 }
 
+// String formats a literal.
 func (l *Literal) String() string {
 	head := ""
 	tail := ""
@@ -322,6 +331,7 @@ func newClause(id int, literals []*Literal) *clause {
 	return c
 }
 
+// String formats a clause.
 func (c clause) String() string {
 	s := make([]string, len(c.literals))
 
@@ -381,10 +391,12 @@ func (c *clause) destroy() {
 	}
 }
 
+// ConflictError is returned when a clause resolves to false.
 type ConflictError struct {
 	clause *clause
 }
 
+// Error implements the error interface.
 func (e *ConflictError) Error() string {
 	return fmt.Sprint("conflict error: ", e.clause)
 }
@@ -450,12 +462,12 @@ type clauseList struct {
 	items []*clause
 	// unit are clauses that have one missing literal and have a value
 	// of false, meaning the remaining one needs to be true.
-	unit Set[*clause]
+	unit set.Set[*clause]
 }
 
 func newClauseList() *clauseList {
 	return &clauseList{
-		unit: NewSet[*clause](),
+		unit: set.New[*clause](),
 	}
 }
 
@@ -540,6 +552,7 @@ type Model[T comparable] struct {
 	learnedClauses *clauseList
 }
 
+// New returns a new model.
 func NewModel[T comparable]() *Model[T] {
 	return &Model[T]{
 		variables:      newVariableSet[T](),
@@ -623,7 +636,7 @@ func (m *Model[T]) AtMostOneOf(t ...T) {
 		l[i] = m.NegatedLiteral(t[i])
 	}
 
-	for a, b := range Permute(l) {
+	for a, b := range util.Permute(l) {
 		m.Clause(a, b)
 	}
 }
@@ -678,6 +691,7 @@ func (m *Model[T]) unit() iter.Seq[*clause] {
 	}
 }
 
+// Reset resets the mode for reuse.  Any unary clauses will be deleted.
 func (m *Model[T]) Reset() {
 	m.variables.reset()
 	m.literals.reset()
@@ -687,6 +701,7 @@ func (m *Model[T]) Reset() {
 	m.learnedClauses = newClauseList()
 }
 
+// Dump prints the model state to the console.
 func (m *Model[T]) Dump() {
 	m.variables.dump()
 	m.clauses.dump()
