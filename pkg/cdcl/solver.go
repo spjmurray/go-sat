@@ -83,6 +83,7 @@ func newPath() *path {
 	return &path{}
 }
 
+//nolint:unused
 func (p *path) dump() {
 	fmt.Println("path:")
 
@@ -137,8 +138,10 @@ func New() *Solver {
 	}
 }
 
-// Dump prints solver state to the console.
-func (s *Solver) Dump() {
+// dump prints solver state to the console.
+//
+//nolint:unused
+func (s *Solver) dump() {
 	s.path.dump()
 }
 
@@ -238,7 +241,7 @@ func (s *Solver) handleConflict(m ModelInterface, clause *clause) error {
 	}
 
 	// Finally add our new clause.
-	l := make([]*Literal, 0, len(partial))
+	l := make([]*literal, 0, len(partial))
 
 	for variable := range partial {
 		l = append(l, newLiteral(variable, partial[variable]))
