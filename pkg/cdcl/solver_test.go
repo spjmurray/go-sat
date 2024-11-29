@@ -14,13 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package sat_test
+package cdcl_test
 
 import (
 	"fmt"
 	"testing"
 
-	sat "github.com/spjmurray/go-sat"
+	"github.com/spjmurray/go-sat/pkg/cdcl"
 )
 
 //nolint:gochecknoglobals
@@ -46,7 +46,7 @@ type variable struct {
 // sudokuRules adds Sudoku rules to the solver.
 //
 //nolint:cyclop
-func sudokuRules(m *sat.Model[variable]) {
+func sudokuRules(m *cdcl.Model[variable]) {
 	for i := range 9 {
 		for j := range 9 {
 			names := make([]variable, 9)
@@ -101,7 +101,7 @@ func sudokuRules(m *sat.Model[variable]) {
 	}
 }
 
-func sudokuInitialize(m *sat.Model[variable]) {
+func sudokuInitialize(m *cdcl.Model[variable]) {
 	for i := range 9 {
 		for j := range 9 {
 			if sudoku[i][j] > 0 {
@@ -111,7 +111,7 @@ func sudokuInitialize(m *sat.Model[variable]) {
 	}
 }
 
-func sudokuPrint(m *sat.Model[variable]) {
+func sudokuPrint(m *cdcl.Model[variable]) {
 	result := [9][9]int{}
 
 	for variable, value := range m.Variables() {
@@ -145,17 +145,17 @@ func sudokuPrint(m *sat.Model[variable]) {
 	fmt.Println("\u2514\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2518")
 }
 
-func ExampleCDCLSolver() {
-	m := sat.NewModel[variable]()
+func ExampleSolver() {
+	m := cdcl.NewModel[variable]()
 
 	// Add implicit rules that apply to all Sudoku problems.
 	sudokuRules(m)
 
 	sudokuInitialize(m)
 
-	s := sat.NewCDCLSolver()
+	s := cdcl.New()
 
-	if err := s.Solve(m, sat.DefaultChooser); err != nil {
+	if err := s.Solve(m, cdcl.DefaultChooser); err != nil {
 		fmt.Println(err)
 	}
 
@@ -180,7 +180,7 @@ func ExampleCDCLSolver() {
 func BenchmarkSudoku(b *testing.B) {
 	b.StopTimer()
 
-	m := sat.NewModel[variable]()
+	m := cdcl.NewModel[variable]()
 
 	sudokuRules(m)
 
@@ -189,9 +189,9 @@ func BenchmarkSudoku(b *testing.B) {
 	for range b.N {
 		sudokuInitialize(m)
 
-		s := sat.NewCDCLSolver()
+		s := cdcl.New()
 
-		if err := s.Solve(m, sat.DefaultChooser); err != nil {
+		if err := s.Solve(m, cdcl.DefaultChooser); err != nil {
 			b.Fatal(err)
 		}
 

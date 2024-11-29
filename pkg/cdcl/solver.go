@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package sat
+package cdcl
 
 import (
 	"errors"
@@ -122,26 +122,28 @@ func (p *path) rollback(level int) error {
 	return nil
 }
 
-// CDCLSolver implements CDCL (conflict driven clause learning).
-type CDCLSolver struct {
+// Solver implements CDCL (conflict driven clause learning).
+type Solver struct {
 	// path that acts as a journal of our decisions and how we arrived there.
 	path *path
 	// level is the decision level.
 	level int
 }
 
-func NewCDCLSolver() *CDCLSolver {
-	return &CDCLSolver{
+// New creates a new CDCL solver.
+func New() *Solver {
+	return &Solver{
 		path: newPath(),
 	}
 }
 
-func (s *CDCLSolver) Dump() {
+// Dump prints solver state to the console.
+func (s *Solver) Dump() {
 	s.path.dump()
 }
 
 // bcpSingle runs a single BCP pass, returning true if we did something.
-func (s *CDCLSolver) bcpSingle(m ModelInterface) (bool, error) {
+func (s *Solver) bcpSingle(m ModelInterface) (bool, error) {
 	// TODO: deterministic option?
 	for clause := range m.unit() {
 		// Find the unset literal and make it true...
@@ -163,7 +165,7 @@ func (s *CDCLSolver) bcpSingle(m ModelInterface) (bool, error) {
 
 // bcp performs BCP while it can, or until a conflict is detected.
 // Returns true on a conflict and the clause that caused the conflict.
-func (s *CDCLSolver) bcp(m ModelInterface) error {
+func (s *Solver) bcp(m ModelInterface) error {
 	for {
 		ok, err := s.bcpSingle(m)
 		if err != nil {
@@ -182,7 +184,7 @@ func (s *CDCLSolver) bcp(m ModelInterface) error {
 // the partial that were set at the current level.  When this hits 1 we've finished
 // resolution.  While we are at it, we also keep tabs on the asserting level we will
 // need to roll back to.
-func (s *CDCLSolver) partialVariablesAtCurrentLevel(partial partialclause, assertingLevel *int) int {
+func (s *Solver) partialVariablesAtCurrentLevel(partial partialclause, assertingLevel *int) int {
 	var count int
 
 	var level int
@@ -205,7 +207,7 @@ func (s *CDCLSolver) partialVariablesAtCurrentLevel(partial partialclause, asser
 	return count
 }
 
-func (s *CDCLSolver) handleConflict(m ModelInterface, clause *clause) error {
+func (s *Solver) handleConflict(m ModelInterface, clause *clause) error {
 	partial := clause.partial()
 
 	var assertingLevel int
@@ -258,7 +260,7 @@ func (s *CDCLSolver) handleConflict(m ModelInterface, clause *clause) error {
 // trial and error is required.  For example, you may maintain some domain
 // specific knowledge about variables and clauses and be able to make more
 // sensible choices than an arbitrary selector.
-func (s *CDCLSolver) Solve(m ModelInterface, decide func(ModelInterface) (int, bool)) error {
+func (s *Solver) Solve(m ModelInterface, decide func(ModelInterface) (int, bool)) error {
 	// Do an initial boolean constant propagation.
 	if err := s.bcp(m); err != nil {
 		return fmt.Errorf("conflict at decision level 0: %w", err)
@@ -303,6 +305,8 @@ func (s *CDCLSolver) Solve(m ModelInterface, decide func(ModelInterface) (int, b
 	return nil
 }
 
+// DefaultChooser selects a variable to set.  This defaults to the first one
+// found that is unset, and sets it to false.
 func DefaultChooser(m ModelInterface) (int, bool) {
 	for i, v := range m.variablesByID() {
 		if v.Undefined() {
