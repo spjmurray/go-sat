@@ -192,13 +192,14 @@ func (s *variableSet[T]) String() string {
 	return strings.Join(t, ", ")
 }
 
+//nolint:unused
 func (s *variableSet[T]) dump() {
 	fmt.Println("Variables:")
 	fmt.Println(s)
 }
 
-// Literal is a reference to a variable used by a clause.
-type Literal struct {
+// literal is a reference to a variable used by a clause.
+type literal struct {
 	// Boolean allows the variable to notify subscribers of updates.
 	Boolean
 	// variable is a reference to the underlying variable.
@@ -207,8 +208,8 @@ type Literal struct {
 	negated bool
 }
 
-func newLiteral(variable *variable, negated bool) *Literal {
-	l := &Literal{
+func newLiteral(variable *variable, negated bool) *literal {
+	l := &literal{
 		Boolean:  NewBoolean(),
 		variable: variable,
 		negated:  negated,
@@ -221,7 +222,7 @@ func newLiteral(variable *variable, negated bool) *Literal {
 
 // update accespts updates from the underlying variable, does any necessary
 // mutations due to negation, then notifies any subscribed clauses.
-func (l *Literal) update(v Boolean) error {
+func (l *literal) update(v Boolean) error {
 	if v.Defined() {
 		return l.define(v.Value() != l.negated)
 	}
@@ -230,7 +231,7 @@ func (l *Literal) update(v Boolean) error {
 }
 
 // String formats a literal.
-func (l *Literal) String() string {
+func (l *literal) String() string {
 	head := ""
 	tail := ""
 
@@ -262,21 +263,21 @@ type literalCacheKey[T comparable] struct {
 // prevent extra resources to constrain memory use and prevent excessive fanout
 // during BCP.
 type literalCache[T comparable] struct {
-	cache map[literalCacheKey[T]]*Literal
+	cache map[literalCacheKey[T]]*literal
 }
 
 func newLiteralCache[T comparable]() *literalCache[T] {
 	return &literalCache[T]{
-		cache: map[literalCacheKey[T]]*Literal{},
+		cache: map[literalCacheKey[T]]*literal{},
 	}
 }
 
-func (c *literalCache[T]) get(variable T, negated bool) (*Literal, bool) {
+func (c *literalCache[T]) get(variable T, negated bool) (*literal, bool) {
 	v, ok := c.cache[literalCacheKey[T]{variable: variable, negated: negated}]
 	return v, ok
 }
 
-func (c *literalCache[T]) set(variable T, negated bool, literal *Literal) {
+func (c *literalCache[T]) set(variable T, negated bool, literal *literal) {
 	c.cache[literalCacheKey[T]{variable: variable, negated: negated}] = literal
 }
 
@@ -293,7 +294,7 @@ type clause struct {
 	// id is the unique id of the clause.
 	id int
 	// literals is an ordered list of all iterals that make up the clause.
-	literals []*Literal
+	literals []*literal
 	// handles remembers all the subsriptions so we can remove them on
 	// destruction.
 	handles []int
@@ -305,7 +306,7 @@ type clause struct {
 	literalValues []int64
 }
 
-func newClause(id int, literals []*Literal) *clause {
+func newClause(id int, literals []*literal) *clause {
 	// The maths for the values is quite simple.
 	// ((1 + 63) >> 6) = (64 >> 6) = 1
 	// ((64 + 63) >> 6) = (127 >> 6) = 1
@@ -472,7 +473,7 @@ func newClauseList() *clauseList {
 }
 
 // Create makes a new clause.
-func (l *clauseList) create(literals []*Literal) *clause {
+func (l *clauseList) create(literals []*literal) *clause {
 	id := len(l.items)
 
 	c := newClause(id, literals)
@@ -518,6 +519,7 @@ func (l *clauseList) destroy() {
 	}
 }
 
+//nolint:unused
 func (l *clauseList) dump() {
 	fmt.Println("clauses:")
 
@@ -535,7 +537,7 @@ type ModelInterface interface {
 	// unit returns an iterator over all unit clauses.
 	unit() iter.Seq[*clause]
 	// createLearnedClause adds a new clause.
-	createLearnedClause(l []*Literal)
+	createLearnedClause(l []*literal)
 	// getVariable maps from variable ID to variable.
 	getVariable(id int) *variable
 }
@@ -566,7 +568,7 @@ func (m *Model[T]) complete() bool {
 	return m.variables.complete()
 }
 
-func (m *Model[T]) createLearnedClause(l []*Literal) {
+func (m *Model[T]) createLearnedClause(l []*literal) {
 	m.learnedClauses.create(l)
 }
 
@@ -574,7 +576,7 @@ func (m *Model[T]) getVariable(id int) *variable {
 	return m.variables.variables[id]
 }
 
-func (m *Model[T]) literal(t T, negated bool) *Literal {
+func (m *Model[T]) literal(t T, negated bool) *literal {
 	if l, ok := m.literals.get(t, negated); ok {
 		return l
 	}
@@ -586,18 +588,8 @@ func (m *Model[T]) literal(t T, negated bool) *Literal {
 	return l
 }
 
-// Literal gets a literal for use in a clause.
-func (m *Model[T]) Literal(t T) *Literal {
-	return m.literal(t, false)
-}
-
-// NegatedLiteral gets a negated literal for use in a clause.
-func (m *Model[T]) NegatedLiteral(t T) *Literal {
-	return m.literal(t, true)
-}
-
 // Clause defines a new clause from a set of literals.
-func (m *Model[T]) Clause(literals ...*Literal) {
+func (m *Model[T]) Clause(literals ...*literal) {
 	m.clauses.create(literals)
 }
 
@@ -605,23 +597,23 @@ func (m *Model[T]) Clause(literals ...*Literal) {
 // NOTE: The assumption here is this is an initial condition for the problem
 // being solved, and should not be preserved across resets.
 func (m *Model[T]) Unary(t T) {
-	m.learnedClauses.create([]*Literal{m.Literal(t)})
+	m.learnedClauses.create([]*literal{m.literal(t, false)})
 }
 
 // NegatedUnary adds a negated unary clause e.g. this must be false.
 // NOTE: The assumption here is this is an initial condition for the problem
 // being solved, and should not be preserved across resets.
 func (m *Model[T]) NegatedUnary(t T) {
-	m.learnedClauses.create([]*Literal{m.NegatedLiteral(t)})
+	m.learnedClauses.create([]*literal{m.literal(t, true)})
 }
 
 // AtLeastOneOf is a helper that defines a clause:
 // x1 v x2 v x3 v ... xN.
 func (m *Model[T]) AtLeastOneOf(t ...T) {
-	l := make([]*Literal, len(t))
+	l := make([]*literal, len(t))
 
 	for i := range t {
-		l[i] = m.Literal(t[i])
+		l[i] = m.literal(t[i], false)
 	}
 
 	m.Clause(l...)
@@ -630,10 +622,10 @@ func (m *Model[T]) AtLeastOneOf(t ...T) {
 // AtMostOneOf is a helper that defines a set of clauses:
 // ^x1 v ^x2, ^x1 v ^x3, ..., ^xN-1 v ^xN.
 func (m *Model[T]) AtMostOneOf(t ...T) {
-	l := make([]*Literal, len(t))
+	l := make([]*literal, len(t))
 
 	for i := range t {
-		l[i] = m.NegatedLiteral(t[i])
+		l[i] = m.literal(t[i], true)
 	}
 
 	for a, b := range slices.Permute(l) {
@@ -644,12 +636,12 @@ func (m *Model[T]) AtMostOneOf(t ...T) {
 // ImpliesAtLeastOneOf is a helper that defines a clause:
 // ^x1 v y1 v y2 v ... yN.
 func (m *Model[T]) ImpliesAtLeastOneOf(t T, ti ...T) {
-	l := make([]*Literal, len(ti)+1)
+	l := make([]*literal, len(ti)+1)
 
-	l[0] = m.NegatedLiteral(t)
+	l[0] = m.literal(t, true)
 
 	for i := range ti {
-		l[i+1] = m.Literal(ti[i])
+		l[i+1] = m.literal(ti[i], false)
 	}
 
 	m.Clause(l...)
@@ -701,8 +693,10 @@ func (m *Model[T]) Reset() {
 	m.learnedClauses = newClauseList()
 }
 
-// Dump prints the model state to the console.
-func (m *Model[T]) Dump() {
+// dump prints the model state to the console.
+//
+//nolint:unused
+func (m *Model[T]) dump() {
 	m.variables.dump()
 	m.clauses.dump()
 }
