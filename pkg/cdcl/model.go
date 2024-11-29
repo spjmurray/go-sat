@@ -21,8 +21,8 @@ import (
 	"iter"
 	"strings"
 
-	"github.com/spjmurray/go-sat/pkg/util"
 	"github.com/spjmurray/go-util/pkg/set"
+	"github.com/spjmurray/go-util/pkg/slices"
 )
 
 // Boolean wraps up a boolean variable which may be undefined.
@@ -636,7 +636,7 @@ func (m *Model[T]) AtMostOneOf(t ...T) {
 		l[i] = m.NegatedLiteral(t[i])
 	}
 
-	for a, b := range util.Permute(l) {
+	for a, b := range slices.Permute(l) {
 		m.Clause(a, b)
 	}
 }
